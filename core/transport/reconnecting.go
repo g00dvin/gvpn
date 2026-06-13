@@ -35,9 +35,9 @@ type ReconnectingConfig struct {
 
 // ReconnectingTransport is a PacketTransport that hides connection loss. When
 // the underlying connection fails, ReadPacket and WritePacket transparently
-// re-dial (with exponential backoff and a fresh SESSION_BIND) and retry; they
-// return ErrClosed only after Close. This is the contract WireGuard relies on:
-// it observes a stall across a network change, never an EOF.
+// re-dial (with paced exponential backoff and a fresh SESSION_BIND) and retry;
+// they return ErrClosed only after Close. This is the contract WireGuard relies
+// on: it observes a stall across a network change, never an EOF.
 type ReconnectingTransport struct {
 	dial         Dialer
 	sessionToken []byte
@@ -45,13 +45,20 @@ type ReconnectingTransport struct {
 	maxBackoff   time.Duration
 	dialTimeout  time.Duration
 
-	connMu  sync.Mutex // guards conn, gen, closed
-	conn    io.ReadWriteCloser
-	gen     uint64
-	closed  bool
-	closeCh chan struct{}
+	// rootCtx is cancelled by Close; it parents every dial context and wakes
+	// every backoff wait, so Close unblocks an in-flight dial immediately.
+	rootCtx    context.Context
+	rootCancel context.CancelFunc
 
-	dialMu  sync.Mutex // serializes (re)dial attempts
+	connMu sync.Mutex // guards conn, gen, closed
+	conn   io.ReadWriteCloser
+	gen    uint64
+	closed bool
+
+	dialMu     sync.Mutex // serializes (re)dial; guards curBackoff, lastDialAt
+	curBackoff time.Duration
+	lastDialAt time.Time
+
 	writeMu sync.Mutex // serializes writes to the current conn
 }
 
@@ -64,7 +71,6 @@ func NewReconnectingTransport(cfg ReconnectingConfig) *ReconnectingTransport {
 		minBackoff:   cfg.MinBackoff,
 		maxBackoff:   cfg.MaxBackoff,
 		dialTimeout:  cfg.DialTimeout,
-		closeCh:      make(chan struct{}),
 	}
 	if t.minBackoff <= 0 {
 		t.minBackoff = defaultMinBackoff
@@ -75,6 +81,7 @@ func NewReconnectingTransport(cfg ReconnectingConfig) *ReconnectingTransport {
 	if t.dialTimeout <= 0 {
 		t.dialTimeout = defaultDialTimeout
 	}
+	t.rootCtx, t.rootCancel = context.WithCancel(context.Background())
 	return t
 }
 
@@ -84,10 +91,11 @@ func (t *ReconnectingTransport) isClosed() bool {
 	return t.closed
 }
 
-// ensure returns a usable connection and its generation. If hasBad is true and
-// the current generation equals badGen, the current connection is treated as
-// dead and a reconnect is forced. ensure blocks (with backoff) until a
-// connection is established or the transport is closed.
+// ensure returns a usable connection and its generation, forcing a reconnect
+// when hasBad && current gen == badGen. It blocks (with paced backoff) until a
+// connection is established or the transport is closed. Reconnect attempts are
+// serialized by dialMu and rate-limited by curBackoff regardless of whether the
+// previous attempt failed to dial or dialed and then immediately died.
 func (t *ReconnectingTransport) ensure(badGen uint64, hasBad bool) (io.ReadWriteCloser, uint64, error) {
 	// Fast path: a good connection already exists.
 	t.connMu.Lock()
@@ -124,11 +132,23 @@ func (t *ReconnectingTransport) ensure(badGen uint64, hasBad bool) (io.ReadWrite
 		_ = old.Close()
 	}
 
-	backoff := t.minBackoff
 	for {
 		if t.isClosed() {
 			return nil, 0, ErrClosed
 		}
+		// Pace attempts: wait out curBackoff since the last attempt so a server
+		// that accepts then instantly drops cannot make us spin.
+		if !t.lastDialAt.IsZero() {
+			if wait := t.curBackoff - time.Since(t.lastDialAt); wait > 0 {
+				select {
+				case <-t.rootCtx.Done():
+					return nil, 0, ErrClosed
+				case <-time.After(wait):
+				}
+			}
+		}
+		t.lastDialAt = time.Now()
+
 		conn, err := t.dialOnce()
 		if err == nil {
 			t.connMu.Lock()
@@ -141,23 +161,29 @@ func (t *ReconnectingTransport) ensure(badGen uint64, hasBad bool) (io.ReadWrite
 			t.gen++
 			g := t.gen
 			t.connMu.Unlock()
+			t.curBackoff = t.minBackoff // reset pacing after a successful connect
 			return conn, g, nil
 		}
-		select {
-		case <-t.closeCh:
-			return nil, 0, ErrClosed
-		case <-time.After(backoff):
-		}
-		backoff *= 2
-		if backoff > t.maxBackoff {
-			backoff = t.maxBackoff
-		}
+		t.growBackoff()
 	}
 }
 
-// dialOnce performs a single dial and sends the SESSION_BIND frame (if any).
+// growBackoff advances curBackoff toward maxBackoff. The caller holds dialMu.
+func (t *ReconnectingTransport) growBackoff() {
+	if t.curBackoff < t.minBackoff {
+		t.curBackoff = t.minBackoff
+		return
+	}
+	t.curBackoff *= 2
+	if t.curBackoff > t.maxBackoff {
+		t.curBackoff = t.maxBackoff
+	}
+}
+
+// dialOnce performs a single dial (bounded by rootCtx + DialTimeout) and sends
+// the SESSION_BIND frame (if any).
 func (t *ReconnectingTransport) dialOnce() (io.ReadWriteCloser, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), t.dialTimeout)
+	ctx, cancel := context.WithTimeout(t.rootCtx, t.dialTimeout)
 	defer cancel()
 	conn, err := t.dial(ctx)
 	if err != nil {
@@ -221,7 +247,7 @@ func (t *ReconnectingTransport) WritePacket(p []byte) error {
 }
 
 // Close releases the transport. In-flight and subsequent Read/Write calls
-// return ErrClosed.
+// return ErrClosed; an in-flight dial is cancelled immediately.
 func (t *ReconnectingTransport) Close() error {
 	t.connMu.Lock()
 	if t.closed {
@@ -229,10 +255,10 @@ func (t *ReconnectingTransport) Close() error {
 		return nil
 	}
 	t.closed = true
-	close(t.closeCh)
 	c := t.conn
 	t.conn = nil
 	t.connMu.Unlock()
+	t.rootCancel() // cancels any in-flight dial and wakes backoff waits
 	if c != nil {
 		return c.Close()
 	}

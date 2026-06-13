@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -190,5 +191,76 @@ func TestReconnectingCloseUnblocksBackoff(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("ReadPacket did not return after Close during backoff")
+	}
+}
+
+// Fix 1: Close must cancel an in-flight dial, not wait out DialTimeout.
+func TestReconnectingCloseUnblocksMidDial(t *testing.T) {
+	dialStarted := make(chan struct{}, 1)
+	dialer := func(ctx context.Context) (io.ReadWriteCloser, error) {
+		select {
+		case dialStarted <- struct{}{}:
+		default:
+		}
+		<-ctx.Done() // block until the dial context is cancelled
+		return nil, ctx.Err()
+	}
+	tr := NewReconnectingTransport(ReconnectingConfig{
+		Dialer:      dialer,
+		DialTimeout: 10 * time.Second, // long; Close must beat this
+	})
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := tr.ReadPacket()
+		errc <- err
+	}()
+	<-dialStarted // a dial is now in flight
+
+	start := time.Now()
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-errc:
+		if err != ErrClosed {
+			t.Fatalf("err = %v, want ErrClosed", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Close took %v to unblock the dial, want < 1s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadPacket did not return after Close during dial")
+	}
+}
+
+// Fix 2: a server that accepts then instantly drops must be paced, not spun on.
+func TestReconnectingPacesAcceptThenDrop(t *testing.T) {
+	var dials int64
+	dialer := func(ctx context.Context) (io.ReadWriteCloser, error) {
+		atomic.AddInt64(&dials, 1)
+		c1, c2 := net.Pipe()
+		c2.Close() // server end immediately closed => client I/O fails at once
+		return c1, nil
+	}
+	tr := NewReconnectingTransport(ReconnectingConfig{
+		Dialer:     dialer,
+		MinBackoff: 20 * time.Millisecond,
+		MaxBackoff: 40 * time.Millisecond,
+	})
+	go func() { tr.ReadPacket() }() // loops reconnecting until Close
+
+	time.Sleep(200 * time.Millisecond)
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	n := atomic.LoadInt64(&dials)
+	// ~20ms pacing over ~200ms => roughly 10 dials. Without pacing this would be
+	// thousands. Allow generous slack but catch a hot spin.
+	if n > 50 {
+		t.Fatalf("dials = %d in 200ms; accept-then-drop is NOT paced (hot spin)", n)
+	}
+	if n < 2 {
+		t.Fatalf("dials = %d; expected several reconnect attempts", n)
 	}
 }
