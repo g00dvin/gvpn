@@ -8,11 +8,12 @@ name: build
 # corresponding code lands. As each component is implemented, its build
 # steps start running automatically.
 #
-# NOTE: the GOST TLS native dependency (OpenSSL 3.x + GOST provider) must be
-# provisioned per runner before the CGO build can succeed. The apt/brew steps
-# below install OpenSSL headers; wiring up the GOST provider itself is tracked
-# in docs/superpowers/specs/2026-06-13-gvpn-transport-design.md (risk #2) and
-# is added together with the CGO module.
+# NOTE: the GOST TLS native dependency (OpenSSL 3.x + the GOST *engine*) must be
+# provisioned per runner before the CGO build can succeed. The apt steps below
+# install the OpenSSL headers (libssl-dev) and the gost engine
+# (libengine-gost-openssl); the core/gosttls package loads the engine at runtime
+# via ENGINESDIR, so no openssl.cnf wiring is needed. Background: risk #2 in
+# docs/superpowers/specs/2026-06-13-gvpn-transport-design.md.
 
 on:
   push:
@@ -51,13 +52,15 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Install GOST/OpenSSL build deps
         if: steps.detect.outputs.present == 'true'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libengine-gost-openssl
       - name: Vet & test
         if: steps.detect.outputs.present == 'true'
         working-directory: core
+        env:
+          CGO_ENABLED: "1"
         run: |
           go vet ./...
-          go test ./...
+          go test -race ./...
 
   server:
     name: Linux server
@@ -79,10 +82,12 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Install GOST/OpenSSL build deps
         if: steps.detect.outputs.present == 'true'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libengine-gost-openssl
       - name: Build
         if: steps.detect.outputs.present == 'true'
         working-directory: server
+        env:
+          CGO_ENABLED: "1"
         run: go build -o ../dist/gvpn-server ./...
       - name: Upload artifact
         if: steps.detect.outputs.present == 'true'
