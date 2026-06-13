@@ -1,0 +1,203 @@
+name: build
+
+# Builds every part of the gvpn monorepo: shared Go core, Linux server,
+# and the Windows / Android / iOS clients.
+#
+# The project is greenfield: each job first detects whether its component
+# exists and skips cleanly if not, so the pipeline stays green until the
+# corresponding code lands. As each component is implemented, its build
+# steps start running automatically.
+#
+# NOTE: the GOST TLS native dependency (OpenSSL 3.x + GOST provider) must be
+# provisioned per runner before the CGO build can succeed. The apt/brew steps
+# below install OpenSSL headers; wiring up the GOST provider itself is tracked
+# in docs/superpowers/specs/2026-06-13-gvpn-transport-design.md (risk #2) and
+# is added together with the CGO module.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  core:
+    name: Shared Go core (vet + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect component
+        id: detect
+        run: |
+          if [ -f core/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::core/ not implemented yet — skipping"
+          fi
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install GOST/OpenSSL build deps
+        if: steps.detect.outputs.present == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Vet & test
+        if: steps.detect.outputs.present == 'true'
+        working-directory: core
+        run: |
+          go vet ./...
+          go test ./...
+
+  server:
+    name: Linux server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect component
+        id: detect
+        run: |
+          if [ -f server/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::server/ not implemented yet — skipping"
+          fi
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install GOST/OpenSSL build deps
+        if: steps.detect.outputs.present == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Build
+        if: steps.detect.outputs.present == 'true'
+        working-directory: server
+        run: go build -o ../dist/gvpn-server ./...
+      - name: Upload artifact
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gvpn-server-linux
+          path: dist/gvpn-server
+
+  windows:
+    name: Windows client (Wails)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect component
+        id: detect
+        shell: bash
+        run: |
+          if [ -f client/windows/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::client/windows/ not implemented yet — skipping"
+          fi
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Wails CLI
+        if: steps.detect.outputs.present == 'true'
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+      - name: Build
+        if: steps.detect.outputs.present == 'true'
+        working-directory: client/windows
+        run: wails build -platform windows/amd64
+      - name: Upload artifact
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gvpn-windows
+          path: client/windows/build/bin/
+
+  android:
+    name: Android client (gomobile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect component
+        id: detect
+        run: |
+          if [ -f client/android/settings.gradle ] || [ -f client/android/settings.gradle.kts ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::client/android/ not implemented yet — skipping"
+          fi
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - if: steps.detect.outputs.present == 'true'
+        uses: android-actions/setup-android@v3
+      - name: Build gomobile .aar
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          gomobile bind -target=android -o client/android/app/libs/core.aar ./core/...
+      - name: Gradle build
+        if: steps.detect.outputs.present == 'true'
+        working-directory: client/android
+        run: ./gradlew assembleRelease
+      - name: Upload artifact
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gvpn-android
+          path: client/android/app/build/outputs/apk/**/*.apk
+
+  ios:
+    name: iOS client (gomobile)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect component
+        id: detect
+        run: |
+          if [ -d client/ios ] && ls client/ios/*.xcodeproj >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::client/ios/ not implemented yet — skipping"
+          fi
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build gomobile .xcframework
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          gomobile bind -target=ios -o client/ios/Core.xcframework ./core/...
+      - name: Xcode build
+        if: steps.detect.outputs.present == 'true'
+        working-directory: client/ios
+        run: |
+          xcodebuild -project gvpn.xcodeproj -scheme gvpn \
+            -configuration Release -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO build

@@ -1,0 +1,28 @@
+# Go build output
+/dist/
+bin/
+*.exe
+*.test
+*.out
+
+# Mobile / desktop build artifacts
+*.aar
+*.xcframework/
+client/windows/build/bin/
+client/android/app/build/
+client/android/app/libs/
+
+# Native libraries
+*.so
+*.dylib
+
+# Secrets & certificates — never commit
+*.key
+*.crt
+*.pem
+server.yaml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
