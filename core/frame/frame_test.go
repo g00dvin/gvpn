@@ -2,6 +2,8 @@ package frame
 
 import (
 	"bytes"
+	"io"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +49,39 @@ func TestWriteFrameTooLarge(t *testing.T) {
 	err := WriteFrame(&buf, TypeData, make([]byte, MaxPayloadSize+1))
 	if err != ErrPayloadTooLarge {
 		t.Fatalf("err = %v, want ErrPayloadTooLarge", err)
+	}
+}
+
+func TestReadFrameRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, TypeHeartbeat, []byte("ping")); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	typ, payload, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if typ != TypeHeartbeat {
+		t.Fatalf("type = %d, want %d", typ, TypeHeartbeat)
+	}
+	if string(payload) != "ping" {
+		t.Fatalf("payload = %q, want %q", payload, "ping")
+	}
+}
+
+func TestReadFrameUnsupportedVersion(t *testing.T) {
+	r := bytes.NewReader([]byte{0x09, 0x00, 0x00, 0x00})
+	_, _, err := ReadFrame(r)
+	if err != ErrUnsupportedVersion {
+		t.Fatalf("err = %v, want ErrUnsupportedVersion", err)
+	}
+}
+
+func TestReadFrameTruncatedPayload(t *testing.T) {
+	// Header claims 4 bytes of payload but only 2 are present.
+	r := strings.NewReader("\x01\x00\x00\x04hi")
+	_, _, err := ReadFrame(r)
+	if err != io.ErrUnexpectedEOF {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
 }
