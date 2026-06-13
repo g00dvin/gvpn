@@ -30,3 +30,22 @@ func TestParseHeaderShort(t *testing.T) {
 		t.Fatalf("err = %v, want ErrShortHeader", err)
 	}
 }
+
+func TestWriteFrame(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, TypeData, []byte("hi")); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	want := []byte{0x01, 0x00, 0x00, 0x02, 'h', 'i'}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("frame = % x, want % x", buf.Bytes(), want)
+	}
+}
+
+func TestWriteFrameTooLarge(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteFrame(&buf, TypeData, make([]byte, MaxPayloadSize+1))
+	if err != ErrPayloadTooLarge {
+		t.Fatalf("err = %v, want ErrPayloadTooLarge", err)
+	}
+}
