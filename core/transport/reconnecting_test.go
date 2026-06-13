@@ -100,3 +100,95 @@ func TestReconnectingHappyPath(t *testing.T) {
 		t.Fatalf("dials = %d, want 1", d.dialCount())
 	}
 }
+
+func TestReconnectingReconnectsAfterDrop(t *testing.T) {
+	d := newPipeDialer(0)
+	tr := NewReconnectingTransport(ReconnectingConfig{
+		Dialer:       d.dial,
+		SessionToken: []byte("sess"),
+		MinBackoff:   time.Millisecond,
+		MaxBackoff:   5 * time.Millisecond,
+	})
+	defer tr.Close()
+
+	// First connection.
+	go func() { tr.WritePacket([]byte("p1")) }()
+	srv1 := <-d.serverC
+	mustReadFrame(t, srv1, frame.TypeSessionBind, "sess")
+	mustReadFrame(t, srv1, frame.TypeData, "p1")
+
+	// Drop the connection from the server side.
+	srv1.Close()
+
+	// The next write must transparently reconnect (second dial) and resend bind.
+	writeErr := make(chan error, 1)
+	go func() { writeErr <- tr.WritePacket([]byte("p2")) }()
+	srv2 := <-d.serverC
+	mustReadFrame(t, srv2, frame.TypeSessionBind, "sess")
+	mustReadFrame(t, srv2, frame.TypeData, "p2")
+	if err := <-writeErr; err != nil {
+		t.Fatalf("WritePacket after drop: %v", err)
+	}
+	if got := d.dialCount(); got != 2 {
+		t.Fatalf("dials = %d, want 2", got)
+	}
+}
+
+func TestReconnectingCloseUnblocksBlockedRead(t *testing.T) {
+	d := newPipeDialer(0)
+	tr := NewReconnectingTransport(ReconnectingConfig{
+		Dialer:     d.dial,
+		MinBackoff: time.Millisecond,
+		MaxBackoff: 5 * time.Millisecond,
+	})
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := tr.ReadPacket()
+		errc <- err
+	}()
+
+	// No SessionToken => no bind frame; the client just blocks reading.
+	<-d.serverC
+	time.Sleep(10 * time.Millisecond) // ensure ReadPacket is parked in ReadFrame
+
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-errc:
+		if err != ErrClosed {
+			t.Fatalf("err = %v, want ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadPacket did not return after Close")
+	}
+}
+
+func TestReconnectingCloseUnblocksBackoff(t *testing.T) {
+	d := newPipeDialer(1 << 30) // every dial fails => stuck in backoff
+	tr := NewReconnectingTransport(ReconnectingConfig{
+		Dialer:     d.dial,
+		MinBackoff: 5 * time.Millisecond,
+		MaxBackoff: 10 * time.Millisecond,
+	})
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := tr.ReadPacket()
+		errc <- err
+	}()
+	time.Sleep(20 * time.Millisecond) // let it enter the backoff loop
+
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-errc:
+		if err != ErrClosed {
+			t.Fatalf("err = %v, want ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadPacket did not return after Close during backoff")
+	}
+}
