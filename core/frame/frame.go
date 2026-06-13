@@ -51,6 +51,8 @@ type Header struct {
 
 // Errors returned by the frame codec.
 var (
+	// ErrShortHeader is returned by ParseHeader when given fewer than HeaderSize
+	// bytes. ReadFrame never returns it, because it always reads a full header first.
 	ErrShortHeader        = errors.New("frame: header too short")
 	ErrPayloadTooLarge    = errors.New("frame: payload exceeds max size")
 	ErrUnsupportedVersion = errors.New("frame: unsupported version")
