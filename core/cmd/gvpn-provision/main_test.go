@@ -2,95 +2,71 @@ package main
 
 import (
 	"bytes"
-	"encoding/hex"
-	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/g00dvin/gvpn/core/provision"
-	"github.com/g00dvin/gvpn/core/wgengine"
 )
 
-func TestRunProvisionsBundleAndRegistry(t *testing.T) {
-	dir := t.TempDir()
-	reg := filepath.Join(dir, "devices.json")
-	out := filepath.Join(dir, "bundle.json")
-	srv, _ := wgengine.GeneratePrivateKey()
+func envKey(t *testing.T) { t.Helper(); t.Setenv("GVPN_MASTER_KEY", strings.Repeat("ab", 32)) }
 
+func TestUserAddEmitsBundleAndRegisters(t *testing.T) {
+	envKey(t)
+	dir := t.TempDir()
+	reg := filepath.Join(dir, "registry.json")
+	out := filepath.Join(dir, "alice.gvpn")
 	var buf bytes.Buffer
 	err := run([]string{
-		"--server-wg-pubkey", srv.PublicKey().Hex(),
-		"--endpoint", "vpn.example.com:443",
-		"--server-name", "vpn.example.com",
-		"--registry", reg,
+		"user", "add", "alice",
+		"--registry", reg, "--host", "vpn.example.com:443", "--sni", "vpn.example.com",
 		"--out", out,
 	}, &buf)
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("user add: %v", err)
 	}
-
-	data, err := os.ReadFile(out)
+	if !strings.Contains(buf.String(), "gvpn://enroll?") {
+		t.Fatalf("output missing deep link: %s", buf.String())
+	}
+	c, _ := provision.NewCipherFromHex(strings.Repeat("ab", 32))
+	fs, err := provision.NewFileStore(reg, c)
 	if err != nil {
-		t.Fatalf("read bundle: %v", err)
+		t.Fatalf("store: %v", err)
 	}
-	b, err := provision.ParseBundle(data)
-	if err != nil {
-		t.Fatalf("ParseBundle: %v", err)
-	}
-	if b.ServerEndpoint != "vpn.example.com:443" || b.ServerName != "vpn.example.com" {
-		t.Fatalf("bundle server coords wrong: %+v", b)
-	}
-
-	store, err := provision.NewFileStore(reg)
-	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
-	}
-	id, _ := provision.ParseDeviceID(b.DeviceID)
-	psk, ok := store.Lookup(id)
-	if !ok || hex.EncodeToString(psk) != b.AuthPSK {
-		t.Fatal("registry PSK does not match bundle")
-	}
-	priv, _ := provision.ParseKey(b.WGPrivateKey)
-	if wgPub, ok := store.WGPublicKey(id); !ok || wgPub != priv.PublicKey() {
-		t.Fatal("registry WG pubkey does not match bundle private key")
-	}
-
-	o := buf.String()
-	if !bytes.Contains(buf.Bytes(), []byte(b.DeviceID)) {
-		t.Fatal("output should mention the DeviceID")
-	}
-	if bytes.Contains(buf.Bytes(), []byte(b.AuthPSK)) || bytes.Contains(buf.Bytes(), []byte(b.WGPrivateKey)) {
-		t.Fatalf("output leaked secret material: %q", o)
+	if _, ok := fs.User("alice"); !ok {
+		t.Fatal("alice not registered")
 	}
 }
 
-func TestRunRequiresServerFlags(t *testing.T) {
-	var buf bytes.Buffer
-	if err := run([]string{"--endpoint", "h:443"}, &buf); err == nil {
-		t.Fatal("run without --server-wg-pubkey/--server-name: want error, got nil")
-	}
-}
-
-func TestRunSecondProvisionAppends(t *testing.T) {
+func TestDeviceAddAllocatesIPAndRegisters(t *testing.T) {
+	envKey(t)
 	dir := t.TempDir()
-	reg := filepath.Join(dir, "devices.json")
-	srv, _ := wgengine.GeneratePrivateKey()
-	args := func(out string) []string {
-		return []string{
-			"--server-wg-pubkey", srv.PublicKey().Hex(),
-			"--endpoint", "h:443", "--server-name", "h",
-			"--registry", reg, "--out", out,
-		}
-	}
+	reg := filepath.Join(dir, "registry.json")
 	var buf bytes.Buffer
-	if err := run(args(filepath.Join(dir, "a.json")), &buf); err != nil {
-		t.Fatalf("run 1: %v", err)
+	if err := run([]string{"user", "add", "bob", "--registry", reg,
+		"--host", "h:443", "--sni", "h", "--out", filepath.Join(dir, "bob.gvpn")}, &buf); err != nil {
+		t.Fatalf("user add: %v", err)
 	}
-	if err := run(args(filepath.Join(dir, "b.json")), &buf); err != nil {
-		t.Fatalf("run 2: %v", err)
+	buf.Reset()
+	srvPriv, _ := provision.ParseKey(strings.Repeat("cd", 32))
+	_ = srvPriv
+	err := run([]string{"device", "add", "--user", "bob", "--registry", reg,
+		"--server-wg-pubkey", strings.Repeat("cd", 32), "--endpoint", "h:443", "--server-name", "h",
+		"--subnet", "10.100.0.0/24", "--out", filepath.Join(dir, "dev.json")}, &buf)
+	if err != nil {
+		t.Fatalf("device add: %v", err)
 	}
-	devs, _ := provision.LoadRegistry(reg)
-	if len(devs) != 2 {
-		t.Fatalf("registry has %d devices after two provisions, want 2", len(devs))
+	if !strings.Contains(buf.String(), "10.100.0.2") {
+		t.Fatalf("expected allocated IP 10.100.0.2 in output: %s", buf.String())
+	}
+}
+
+func TestUserAddRequiresMasterKey(t *testing.T) {
+	t.Setenv("GVPN_MASTER_KEY", "")
+	var buf bytes.Buffer
+	err := run([]string{"user", "add", "alice", "--registry",
+		filepath.Join(t.TempDir(), "r.json"), "--host", "h:443", "--sni", "h"}, &buf)
+	if err == nil {
+		t.Fatal("expected master-key error")
 	}
 }
