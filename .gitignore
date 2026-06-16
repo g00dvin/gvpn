@@ -5,6 +5,13 @@ bin/
 *.test
 *.out
 
+# Compiled command binaries (e.g. `go build ./cmd/gvpn-provision`)
+gvpn-provision
+gvpn-server
+
+# Go workspace lock (local-only)
+go.work.sum
+
 # Mobile / desktop build artifacts
 *.aar
 *.xcframework/
@@ -21,6 +28,10 @@ client/android/app/libs/
 *.crt
 *.pem
 server.yaml
+
+# Enrollment / device bundles and dev registries (contain secrets)
+*.gvpn
+registry.json
 
 # OS / editor
 .DS_Store
