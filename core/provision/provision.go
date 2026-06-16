@@ -52,13 +52,6 @@ type Bundle struct {
 	ServerCAPEM       string `json:"server_ca_pem,omitempty"` // trust anchor PEM (optional)
 }
 
-// Device is the server-side registry record for one device.
-type Device struct {
-	DeviceID    string `json:"device_id"`     // UUID string
-	AuthPSK     string `json:"auth_psk"`      // hex, 32 bytes
-	WGPublicKey string `json:"wg_public_key"` // hex, 32 bytes
-}
-
 // GenerateParams holds the server-side coordinates embedded into a new bundle.
 type GenerateParams struct {
 	ServerWGPublicKey wgengine.Key
