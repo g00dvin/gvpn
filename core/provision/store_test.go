@@ -108,6 +108,27 @@ func TestFileStoreDuplicateUser(t *testing.T) {
 	}
 }
 
+func TestFileStoreRemoveDeviceByBareHex(t *testing.T) {
+	fs, _ := newTestStore(t)
+	if _, _, err := fs.AddUser("alice"); err != nil {
+		t.Fatal(err)
+	}
+	wg, _ := GeneratePrivateKeyHex(t)
+	canonical := "22222222-2222-4222-8222-222222222222"
+	dev := Device{DeviceID: canonical, User: "alice", WGPublic: wg, TunnelIP: "10.100.0.2", Source: "admin"}
+	if err := fs.AddDevice(dev, []byte("psk")); err != nil {
+		t.Fatal(err)
+	}
+	bare := "22222222222242228222222222222222" // same id, no hyphens
+	if err := fs.RemoveDevice(bare); err != nil {
+		t.Fatalf("RemoveDevice by bare hex: %v", err)
+	}
+	id, _ := ParseDeviceID(canonical)
+	if _, ok := fs.Lookup(id); ok {
+		t.Fatal("device still present after revoke-by-bare-hex")
+	}
+}
+
 // GeneratePrivateKeyHex returns a fresh WG public key hex for tests.
 func GeneratePrivateKeyHex(t *testing.T) (string, string) {
 	t.Helper()

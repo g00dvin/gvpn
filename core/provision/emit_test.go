@@ -30,3 +30,17 @@ func TestTerminalQR(t *testing.T) {
 		t.Fatal("terminal QR looks empty")
 	}
 }
+
+func TestWriteQRPNGIs0600(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "code.png")
+	if err := WriteQRPNG("gvpn://enroll?u=alice&psk=secret", p, 256); err != nil {
+		t.Fatalf("WriteQRPNG: %v", err)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("QR PNG mode = %v, want 0600", fi.Mode().Perm())
+	}
+}

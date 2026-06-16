@@ -217,7 +217,7 @@ func (s *FileStore) AddDevice(d Device, pskPlain []byte) error {
 		return fmt.Errorf("provision: unknown user %q", d.User)
 	}
 	for _, e := range s.reg.Devices {
-		if e.DeviceID == d.DeviceID {
+		if sameDeviceID(e.DeviceID, d.DeviceID) {
 			return fmt.Errorf("provision: device %s already registered", d.DeviceID)
 		}
 	}
@@ -244,7 +244,7 @@ func (s *FileStore) RemoveDevice(deviceID string) error {
 	out := s.reg.Devices[:0:0]
 	found := false
 	for _, d := range s.reg.Devices {
-		if d.DeviceID == deviceID {
+		if sameDeviceID(d.DeviceID, deviceID) {
 			found = true
 			continue
 		}
@@ -260,6 +260,18 @@ func (s *FileStore) RemoveDevice(deviceID string) error {
 		return err
 	}
 	return nil
+}
+
+// sameDeviceID reports whether two device-id strings denote the same 16-byte id,
+// tolerating canonical-vs-bare-hex formatting. Falls back to string equality if
+// either value is not a valid id.
+func sameDeviceID(a, b string) bool {
+	ida, erra := ParseDeviceID(a)
+	idb, errb := ParseDeviceID(b)
+	if erra != nil || errb != nil {
+		return a == b
+	}
+	return ida == idb
 }
 
 // genWGKeyHexForTest is a small helper used by store_test.go.
