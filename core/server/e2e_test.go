@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +28,19 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 	clientTunIP := netip.MustParseAddr("192.168.4.2")
 
 	// Provision a device and register it where the server's store will load it.
-	bundle, deviceRec, err := provision.Generate(provision.GenerateParams{
+	reg := filepath.Join(t.TempDir(), "registry.json")
+	c, err := provision.NewCipherFromHex(strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	store, err := provision.NewFileStore(reg, c)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	if _, _, err := store.AddUser("e2e"); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	bundle, mat, err := provision.Generate("e2e", clientTunIP.String(), provision.GenerateParams{
 		ServerWGPublicKey: serverWG.PublicKey(),
 		ServerEndpoint:    "vpn.example.com:443",
 		ServerName:        "vpn.example.com",
@@ -35,13 +48,11 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	reg := filepath.Join(t.TempDir(), "devices.json")
-	if err := provision.AppendDevice(reg, deviceRec); err != nil {
-		t.Fatalf("AppendDevice: %v", err)
-	}
-	store, err := provision.NewFileStore(reg)
-	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+	if err := store.AddDevice(provision.Device{
+		DeviceID: mat.DeviceID, User: mat.User, WGPublic: mat.WGPublic,
+		TunnelIP: mat.TunnelIP, Source: "admin",
+	}, mat.AuthPSK); err != nil {
+		t.Fatalf("AddDevice: %v", err)
 	}
 
 	// The server's per-client TUN factory creates a netstack device and hands the

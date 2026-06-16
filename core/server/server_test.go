@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +16,11 @@ import (
 // An unauthenticated connection must be closed by the gate and must never reach
 // the TUN factory / WireGuard setup; Server.Close must then return cleanly.
 func TestServerClosesUnauthenticatedConn(t *testing.T) {
-	store, err := provision.NewFileStore(filepath.Join(t.TempDir(), "empty.json"))
+	c, err := provision.NewCipherFromHex(strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	store, err := provision.NewFileStore(filepath.Join(t.TempDir(), "empty.json"), c)
 	if err != nil {
 		t.Fatalf("NewFileStore: %v", err)
 	}
