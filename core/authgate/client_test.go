@@ -68,6 +68,32 @@ func TestEndToEndAuthenticated(t *testing.T) {
 	got.r.Conn.Close()
 }
 
+// TestWriteEnrollAuthAdmittedByGate confirms WriteEnrollAuth produces a KindEnroll
+// AUTH frame the gate verifies against the user's enroll PSK. It uses the gate's
+// real clock because WriteEnrollAuth stamps with time.Now().
+func TestWriteEnrollAuthAdmittedByGate(t *testing.T) {
+	uid := [16]byte{3, 1, 4}
+	psk := []byte("enroll-psk")
+	g := NewGate(NewMapStoreWithEnroll(nil, map[[16]byte][]byte{uid: psk}), nil)
+
+	client, server := net.Pipe()
+	defer client.Close()
+	errc := make(chan error, 1)
+	go func() { errc <- WriteEnrollAuth(client, psk, uid) }()
+
+	res, err := g.Handle(server)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if werr := <-errc; werr != nil {
+		t.Fatalf("WriteEnrollAuth: %v", werr)
+	}
+	if !res.Authenticated || res.Kind != KindEnroll || res.UserID != uid {
+		t.Fatalf("auth=%v kind=%d user=%x; want enroll %x", res.Authenticated, res.Kind, res.UserID, uid)
+	}
+	res.Conn.Close()
+}
+
 // TestEndToEndDecoy confirms an unauthenticated client is served the decoy page.
 func TestEndToEndDecoy(t *testing.T) {
 	origin, err := net.Listen("tcp", "127.0.0.1:0")

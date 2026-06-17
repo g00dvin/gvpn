@@ -40,6 +40,10 @@ const (
 	TypeSessionBind Type = 3
 	// TypeControl is reserved for future orchestrator control messages.
 	TypeControl Type = 4
+	// TypeEnrollRequest carries a device's enrollment request (its WG public key).
+	TypeEnrollRequest Type = 5
+	// TypeEnrollResponse carries the server's enrollment reply (device id, tunnel IP, device PSK).
+	TypeEnrollResponse Type = 6
 )
 
 // Header is the fixed-size frame header.

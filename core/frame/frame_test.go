@@ -126,3 +126,19 @@ func TestReadFrameCleanEOF(t *testing.T) {
 		t.Fatalf("err = %v, want io.EOF", err)
 	}
 }
+
+func TestEnrollFrameTypesRoundTrip(t *testing.T) {
+	for _, typ := range []Type{TypeEnrollRequest, TypeEnrollResponse} {
+		var buf bytes.Buffer
+		if err := WriteFrame(&buf, typ, []byte("payload")); err != nil {
+			t.Fatalf("WriteFrame(%d): %v", typ, err)
+		}
+		gotType, payload, err := ReadFrame(&buf)
+		if err != nil {
+			t.Fatalf("ReadFrame: %v", err)
+		}
+		if gotType != typ || string(payload) != "payload" {
+			t.Fatalf("round trip = (%d,%q), want (%d,payload)", gotType, payload, typ)
+		}
+	}
+}

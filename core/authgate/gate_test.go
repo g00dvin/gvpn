@@ -176,3 +176,82 @@ func TestGateNilDecoyClosesConn(t *testing.T) {
 		t.Fatal("server conn still open after nil-decoy decoy path")
 	}
 }
+
+func TestGateEnrollPath(t *testing.T) {
+	uid := [16]byte{4, 5, 6}
+	psk := []byte("enroll-psk")
+	g := NewGate(NewMapStoreWithEnroll(nil, map[[16]byte][]byte{uid: psk}), nil)
+	const now = int64(1_700_000_000)
+	g.now = fixedClock(now)
+
+	client, server := net.Pipe()
+	defer client.Close()
+	go func() {
+		tok, _ := MakeEnrollToken(psk, uid, time.Unix(now, 0))
+		frame.WriteFrame(client, frame.TypeAuth, tok)
+		frame.WriteFrame(client, frame.TypeData, []byte("after"))
+	}()
+
+	res, err := g.Handle(server)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !res.Authenticated || res.Kind != KindEnroll || res.UserID != uid {
+		t.Fatalf("auth=%v kind=%d user=%x; want true enroll %x", res.Authenticated, res.Kind, res.UserID, uid)
+	}
+	if res.DeviceID != ([16]byte{}) {
+		t.Fatal("DeviceID must be zero on the enroll path")
+	}
+	typ, payload, err := frame.ReadFrame(res.Conn)
+	if err != nil || typ != frame.TypeData || string(payload) != "after" {
+		t.Fatalf("next frame = (%d,%q),%v; want (DATA,after)", typ, payload, err)
+	}
+	res.Conn.Close()
+}
+
+func TestGateDecoyOnUnknownEnrollUser(t *testing.T) {
+	uid := [16]byte{1, 1}
+	psk := []byte("enroll-psk")
+	fd := &fakeDecoy{}
+	g := NewGate(NewMapStore(nil), fd) // no enroll users
+	const now = int64(1_700_000_000)
+	g.now = fixedClock(now)
+	client, server := net.Pipe()
+	defer client.Close()
+	go func() {
+		tok, _ := MakeEnrollToken(psk, uid, time.Unix(now, 0))
+		frame.WriteFrame(client, frame.TypeAuth, tok)
+		client.Close()
+	}()
+	res, _ := g.Handle(server)
+	if res.Authenticated {
+		t.Fatal("unknown enroll user authenticated; want decoy")
+	}
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if !fd.called {
+		t.Fatal("decoy not invoked for unknown enroll user")
+	}
+}
+
+func TestGateDeviceTokenNotAcceptedAsEnrollOnlyID(t *testing.T) {
+	// An id present only in the enroll map must NOT authenticate a KindDevice
+	// token: the device lookup misses, so the connection goes to the decoy.
+	id := [16]byte{2, 2}
+	psk := []byte("psk")
+	fd := &fakeDecoy{}
+	g := NewGate(NewMapStoreWithEnroll(nil, map[[16]byte][]byte{id: psk}), fd)
+	const now = int64(1_700_000_000)
+	g.now = fixedClock(now)
+	client, server := net.Pipe()
+	defer client.Close()
+	go func() {
+		tok, _ := MakeToken(psk, id, time.Unix(now, 0)) // DEVICE token
+		frame.WriteFrame(client, frame.TypeAuth, tok)
+		client.Close()
+	}()
+	res, _ := g.Handle(server)
+	if res.Authenticated {
+		t.Fatal("device token matched an enroll-only id; want decoy")
+	}
+}

@@ -68,6 +68,13 @@ func (s *FileStore) EnrollPSK(userID [16]byte) ([]byte, bool) {
 	return nil, false
 }
 
+// EnrollLookup implements authgate.DeviceStore for the enrollment path: it
+// returns the user's decrypted enrollment PSK. It is EnrollPSK under the name
+// the gate's interface expects.
+func (s *FileStore) EnrollLookup(userID [16]byte) ([]byte, bool) {
+	return s.EnrollPSK(userID)
+}
+
 // WGPublicKey returns the device's registered WireGuard public key.
 func (s *FileStore) WGPublicKey(deviceID [16]byte) (wgengine.Key, bool) {
 	s.mu.RLock()

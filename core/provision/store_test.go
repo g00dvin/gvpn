@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/g00dvin/gvpn/core/authgate"
 )
 
 func newTestStore(t *testing.T) (*FileStore, string) {
@@ -126,6 +128,22 @@ func TestFileStoreRemoveDeviceByBareHex(t *testing.T) {
 	id, _ := ParseDeviceID(canonical)
 	if _, ok := fs.Lookup(id); ok {
 		t.Fatal("device still present after revoke-by-bare-hex")
+	}
+}
+
+// FileStore must satisfy the gate's DeviceStore (device + enroll lookups).
+var _ authgate.DeviceStore = (*FileStore)(nil)
+
+func TestFileStoreEnrollLookupMatchesEnrollPSK(t *testing.T) {
+	fs, _ := newTestStore(t)
+	u, enrollPSK, err := fs.AddUser("carol")
+	if err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	uid, _ := ParseDeviceID(u.ID)
+	got, ok := fs.EnrollLookup(uid)
+	if !ok || string(got) != string(enrollPSK) {
+		t.Fatalf("EnrollLookup = %q,%v want the minted secret", got, ok)
 	}
 }
 
