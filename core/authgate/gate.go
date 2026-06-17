@@ -18,11 +18,17 @@ const (
 type Result struct {
 	// Authenticated is true when the first frame was a valid, fresh AUTH token.
 	Authenticated bool
-	// DeviceID is the verified device; set only when Authenticated.
+	// Kind is the authenticated token kind (KindDevice or KindEnroll); valid only
+	// when Authenticated.
+	Kind uint8
+	// DeviceID is the verified device; set only when Authenticated && Kind==KindDevice.
 	DeviceID [16]byte
+	// UserID is the verified enrolling user; set only when Authenticated && Kind==KindEnroll.
+	UserID [16]byte
 	// Conn is the connection positioned immediately after the AUTH frame, ready
-	// for the VPN data path. Set only when Authenticated; otherwise the gate has
-	// already handed the connection to the decoy (or closed it) and Conn is nil.
+	// for the next exchange (data path, or the enrollment request). Set only when
+	// Authenticated; otherwise the gate has already handed the connection to the
+	// decoy (or closed it) and Conn is nil.
 	Conn net.Conn
 }
 
@@ -80,7 +86,18 @@ func (g *Gate) Handle(conn net.Conn) (Result, error) {
 	if err != nil {
 		return g.toDecoy(conn, rec.buf)
 	}
-	psk, ok := g.store.Lookup(tok.DeviceID)
+	var (
+		psk []byte
+		ok  bool
+	)
+	switch tok.Kind {
+	case KindDevice:
+		psk, ok = g.store.Lookup(tok.DeviceID)
+	case KindEnroll:
+		psk, ok = g.store.EnrollLookup(tok.DeviceID)
+	default:
+		return g.toDecoy(conn, rec.buf)
+	}
 	if !ok {
 		return g.toDecoy(conn, rec.buf)
 	}
@@ -91,8 +108,14 @@ func (g *Gate) Handle(conn net.Conn) (Result, error) {
 		return g.toDecoy(conn, rec.buf)
 	}
 
-	_ = conn.SetReadDeadline(time.Time{}) // hand a clean conn to the data path
-	return Result{Authenticated: true, DeviceID: tok.DeviceID, Conn: conn}, nil
+	_ = conn.SetReadDeadline(time.Time{}) // hand a clean conn to the next exchange
+	res := Result{Authenticated: true, Kind: tok.Kind, Conn: conn}
+	if tok.Kind == KindEnroll {
+		res.UserID = tok.DeviceID
+	} else {
+		res.DeviceID = tok.DeviceID
+	}
+	return res, nil
 }
 
 func (g *Gate) toDecoy(conn net.Conn, prefix []byte) (Result, error) {
