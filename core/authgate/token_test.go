@@ -66,3 +66,49 @@ func TestParseTokenWrongSize(t *testing.T) {
 		t.Fatal("ParseToken(short): want error, got nil")
 	}
 }
+
+func TestEnrollTokenRoundTrip(t *testing.T) {
+	psk := []byte("enroll-psk")
+	uid := [16]byte{9, 9, 9}
+	now := time.Unix(1_700_000_000, 0)
+	raw, err := MakeEnrollToken(psk, uid, now)
+	if err != nil {
+		t.Fatalf("MakeEnrollToken: %v", err)
+	}
+	if len(raw) != TokenSize {
+		t.Fatalf("token size = %d, want %d", len(raw), TokenSize)
+	}
+	tok, err := ParseToken(raw)
+	if err != nil {
+		t.Fatalf("ParseToken: %v", err)
+	}
+	if tok.Kind != KindEnroll {
+		t.Fatalf("Kind = %d, want KindEnroll", tok.Kind)
+	}
+	if tok.DeviceID != uid {
+		t.Fatalf("id = %x, want %x", tok.DeviceID, uid)
+	}
+	if err := tok.Verify(psk, now, 30*time.Second); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
+
+func TestMakeTokenIsDeviceKind(t *testing.T) {
+	raw, _ := MakeToken([]byte("psk"), [16]byte{1}, time.Unix(1_700_000_000, 0))
+	tok, _ := ParseToken(raw)
+	if tok.Kind != KindDevice {
+		t.Fatalf("MakeToken kind = %d, want KindDevice", tok.Kind)
+	}
+}
+
+func TestTokenKindIsBoundByMAC(t *testing.T) {
+	// Flipping the kind byte of a device token must invalidate the MAC.
+	psk := []byte("psk")
+	now := time.Unix(1_700_000_000, 0)
+	raw, _ := MakeToken(psk, [16]byte{1}, now)
+	raw[1] = KindEnroll // tamper the kind byte
+	tok, _ := ParseToken(raw)
+	if err := tok.Verify(psk, now, 30*time.Second); err == nil {
+		t.Fatal("kind tamper accepted; MAC must bind kind")
+	}
+}

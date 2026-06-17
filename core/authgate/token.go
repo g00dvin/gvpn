@@ -19,10 +19,17 @@ const tokenVersion uint8 = 1
 
 const macSize = 32 // HMAC-SHA256 output
 
+// Token kinds select the gate path (design §6). The 16-byte id field is a
+// DeviceID for KindDevice and a user id for KindEnroll.
+const (
+	KindDevice uint8 = 0
+	KindEnroll uint8 = 1
+)
+
 // TokenSize is the exact marshaled size of an AUTH token and therefore the
 // exact frame payload length the gate accepts for an AUTH frame:
-// version(1) + deviceID(16) + nonce(16) + timestamp(8) + mac(32).
-const TokenSize = 1 + 16 + 16 + 8 + macSize // 73
+// version(1) + kind(1) + id(16) + nonce(16) + timestamp(8) + mac(32).
+const TokenSize = 1 + 1 + 16 + 16 + 8 + macSize // 74
 
 // Token errors.
 var (
@@ -32,25 +39,37 @@ var (
 	ErrStale        = errors.New("authgate: token timestamp outside window")
 )
 
-// Token is the in-tunnel authentication token. The MAC binds the device, a
-// random nonce, and a timestamp under the device PSK, making each token
-// high-entropy, replay-bounded, and unlinkable (design §3).
+// Token is the in-tunnel authentication token. Kind selects the gate path; the
+// DeviceID field carries a device id (KindDevice) or a user id (KindEnroll). The
+// MAC binds the kind, the id, a random nonce, and a timestamp under the relevant
+// PSK, making each token high-entropy, replay-bounded, and unlinkable (§3).
 type Token struct {
 	Version   uint8
+	Kind      uint8
 	DeviceID  [16]byte
 	Nonce     [16]byte
 	Timestamp int64
 	MAC       [macSize]byte
 }
 
-// MakeToken builds a fresh AUTH token for deviceID under psk, stamped at now,
-// and returns its marshaled form (use it as a frame.TypeAuth payload).
+// MakeToken builds a fresh KindDevice AUTH token for deviceID under the
+// per-device psk, stamped at now, and returns its marshaled form.
 func MakeToken(psk []byte, deviceID [16]byte, now time.Time) ([]byte, error) {
+	return makeToken(psk, KindDevice, deviceID, now)
+}
+
+// MakeEnrollToken builds a fresh KindEnroll AUTH token for userID under the
+// user's enrollment psk. A new device sends it to bootstrap enrollment (§7).
+func MakeEnrollToken(psk []byte, userID [16]byte, now time.Time) ([]byte, error) {
+	return makeToken(psk, KindEnroll, userID, now)
+}
+
+func makeToken(psk []byte, kind uint8, id [16]byte, now time.Time) ([]byte, error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err
 	}
-	t := Token{Version: tokenVersion, DeviceID: deviceID, Nonce: nonce, Timestamp: now.Unix()}
+	t := Token{Version: tokenVersion, Kind: kind, DeviceID: id, Nonce: nonce, Timestamp: now.Unix()}
 	t.MAC = computeMAC(psk, t)
 	return t.Marshal(), nil
 }
@@ -59,10 +78,11 @@ func MakeToken(psk []byte, deviceID [16]byte, now time.Time) ([]byte, error) {
 func (t Token) Marshal() []byte {
 	b := make([]byte, TokenSize)
 	b[0] = t.Version
-	copy(b[1:17], t.DeviceID[:])
-	copy(b[17:33], t.Nonce[:])
-	binary.BigEndian.PutUint64(b[33:41], uint64(t.Timestamp))
-	copy(b[41:73], t.MAC[:])
+	b[1] = t.Kind
+	copy(b[2:18], t.DeviceID[:])
+	copy(b[18:34], t.Nonce[:])
+	binary.BigEndian.PutUint64(b[34:42], uint64(t.Timestamp))
+	copy(b[42:74], t.MAC[:])
 	return b
 }
 
@@ -74,10 +94,11 @@ func ParseToken(b []byte) (Token, error) {
 	}
 	var t Token
 	t.Version = b[0]
-	copy(t.DeviceID[:], b[1:17])
-	copy(t.Nonce[:], b[17:33])
-	t.Timestamp = int64(binary.BigEndian.Uint64(b[33:41]))
-	copy(t.MAC[:], b[41:73])
+	t.Kind = b[1]
+	copy(t.DeviceID[:], b[2:18])
+	copy(t.Nonce[:], b[18:34])
+	t.Timestamp = int64(binary.BigEndian.Uint64(b[34:42]))
+	copy(t.MAC[:], b[42:74])
 	return t, nil
 }
 
@@ -101,10 +122,10 @@ func (t Token) Verify(psk []byte, now time.Time, window time.Duration) error {
 	return nil
 }
 
-// computeMAC = HMAC-SHA256(psk, version || deviceID || nonce || timestamp).
+// computeMAC = HMAC-SHA256(psk, version || kind || id || nonce || timestamp).
 func computeMAC(psk []byte, t Token) [macSize]byte {
 	mac := hmac.New(sha256.New, psk)
-	mac.Write([]byte{t.Version})
+	mac.Write([]byte{t.Version, t.Kind})
 	mac.Write(t.DeviceID[:])
 	mac.Write(t.Nonce[:])
 	var ts [8]byte
