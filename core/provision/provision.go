@@ -1,8 +1,6 @@
-// Package provision mints gvpn device credentials. Generate produces a client
-// Bundle (DeviceID, AUTH PSK, WireGuard keypair, server coordinates) and a
-// matching server registry Device record (DeviceID, AUTH PSK, WG public key).
-// The server loads the registry via FileStore to authenticate devices and
-// configure WireGuard peers. Pure Go, no cgo.
+// Package provision mints gvpn credentials. It manages a user/device registry
+// (FileStore), encrypts secrets at rest (Cipher), allocates tunnel IPs
+// (AllocateIP), and emits enrollment bundles. Pure Go, no cgo.
 package provision
 
 import (
@@ -15,20 +13,20 @@ import (
 	"github.com/g00dvin/gvpn/core/wgengine"
 )
 
-// authPSKSize is the size in bytes of the in-tunnel AUTH pre-shared key.
+// authPSKSize is the size in bytes of AUTH / enrollment pre-shared keys.
 const authPSKSize = 32
 
-// DeviceID is a 16-byte UUIDv4 device identifier.
+// DeviceID is a 16-byte UUIDv4 identifier (used for both device and user ids).
 type DeviceID [16]byte
 
-// NewDeviceID generates a random UUIDv4 DeviceID.
+// NewDeviceID generates a random UUIDv4.
 func NewDeviceID() (DeviceID, error) {
 	var id DeviceID
 	if _, err := io.ReadFull(rand.Reader, id[:]); err != nil {
 		return DeviceID{}, err
 	}
-	id[6] = (id[6] & 0x0f) | 0x40 // version 4
-	id[8] = (id[8] & 0x3f) | 0x80 // variant 10xx
+	id[6] = (id[6] & 0x0f) | 0x40
+	id[8] = (id[8] & 0x3f) | 0x80
 	return id, nil
 }
 
@@ -40,26 +38,29 @@ func (d DeviceID) String() string {
 		hex.EncodeToString(d[10:16]))
 }
 
-// Bundle is the client-side device bundle: everything a client needs to connect.
-// It contains secrets (WGPrivateKey, AuthPSK) and must be stored 0600.
+// Bundle is the client-side device bundle (contains secrets; store 0600).
 type Bundle struct {
-	DeviceID          string `json:"device_id"`               // UUID string
-	AuthPSK           string `json:"auth_psk"`                // hex, 32 bytes
-	WGPrivateKey      string `json:"wg_private_key"`          // hex, 32 bytes
-	ServerWGPublicKey string `json:"server_wg_public_key"`    // hex, 32 bytes
-	ServerEndpoint    string `json:"server_endpoint"`         // host:port
-	ServerName        string `json:"server_name"`             // TLS server name
-	ServerCAPEM       string `json:"server_ca_pem,omitempty"` // trust anchor PEM (optional)
+	DeviceID          string `json:"device_id"`
+	AuthPSK           string `json:"auth_psk"`
+	WGPrivateKey      string `json:"wg_private_key"`
+	TunnelIP          string `json:"tunnel_ip"`
+	ServerWGPublicKey string `json:"server_wg_public_key"`
+	ServerEndpoint    string `json:"server_endpoint"`
+	ServerName        string `json:"server_name"`
+	ServerCAPEM       string `json:"server_ca_pem,omitempty"`
 }
 
-// Device is the server-side registry record for one device.
-type Device struct {
-	DeviceID    string `json:"device_id"`     // UUID string
-	AuthPSK     string `json:"auth_psk"`      // hex, 32 bytes
-	WGPublicKey string `json:"wg_public_key"` // hex, 32 bytes
+// Material is the freshly minted, still-plaintext result of Generate, ready to
+// be turned into an encrypted registry Device via Record.
+type Material struct {
+	DeviceID string
+	User     string
+	TunnelIP string
+	WGPublic string
+	AuthPSK  []byte
 }
 
-// GenerateParams holds the server-side coordinates embedded into a new bundle.
+// GenerateParams holds the server coordinates embedded into a bundle.
 type GenerateParams struct {
 	ServerWGPublicKey wgengine.Key
 	ServerEndpoint    string
@@ -67,41 +68,51 @@ type GenerateParams struct {
 	ServerCAPEM       string
 }
 
-// Generate mints a new device: a UUIDv4 DeviceID, a random AUTH PSK, and a
-// WireGuard keypair. It returns the client Bundle and the server Device record,
-// which share the DeviceID and AUTH PSK; the Device carries the WG public key
-// whose private half lives only in the Bundle.
-func Generate(p GenerateParams) (Bundle, Device, error) {
+// Generate mints a device for user with the given tunnel IP: a UUIDv4 DeviceID,
+// a random AUTH PSK, and a WireGuard keypair. It returns the client Bundle and
+// the plaintext Material (for the server registry).
+func Generate(user, tunnelIP string, p GenerateParams) (Bundle, Material, error) {
 	id, err := NewDeviceID()
 	if err != nil {
-		return Bundle{}, Device{}, err
+		return Bundle{}, Material{}, err
 	}
 	psk := make([]byte, authPSKSize)
 	if _, err := io.ReadFull(rand.Reader, psk); err != nil {
-		return Bundle{}, Device{}, err
+		return Bundle{}, Material{}, err
 	}
 	wgPriv, err := wgengine.GeneratePrivateKey()
 	if err != nil {
-		return Bundle{}, Device{}, err
+		return Bundle{}, Material{}, err
 	}
-	pskHex := hex.EncodeToString(psk)
 	idStr := id.String()
-
 	bundle := Bundle{
 		DeviceID:          idStr,
-		AuthPSK:           pskHex,
+		AuthPSK:           hex.EncodeToString(psk),
 		WGPrivateKey:      wgPriv.Hex(),
+		TunnelIP:          tunnelIP,
 		ServerWGPublicKey: p.ServerWGPublicKey.Hex(),
 		ServerEndpoint:    p.ServerEndpoint,
 		ServerName:        p.ServerName,
 		ServerCAPEM:       p.ServerCAPEM,
 	}
-	device := Device{
-		DeviceID:    idStr,
-		AuthPSK:     pskHex,
-		WGPublicKey: wgPriv.PublicKey().Hex(),
+	mat := Material{
+		DeviceID: idStr, User: user, TunnelIP: tunnelIP,
+		WGPublic: wgPriv.PublicKey().Hex(), AuthPSK: psk,
 	}
-	return bundle, device, nil
+	return bundle, mat, nil
+}
+
+// Record turns Material into an encrypted registry Device. source is "admin" or
+// "enroll".
+func (m Material) Record(c *Cipher, source string) (Device, error) {
+	enc, err := c.Seal(m.AuthPSK)
+	if err != nil {
+		return Device{}, err
+	}
+	return Device{
+		DeviceID: m.DeviceID, User: m.User, WGPublic: m.WGPublic,
+		TunnelIP: m.TunnelIP, AuthPSKEnc: enc, Source: source,
+	}, nil
 }
 
 // Marshal serializes the bundle as indented JSON.
