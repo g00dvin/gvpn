@@ -117,6 +117,20 @@ func (s *FileStore) User(handle string) (User, bool) {
 	return User{}, false
 }
 
+// UserByID returns the user whose 16-byte id matches userID. The server's
+// enrollment handler resolves the gate's verified UserID (from a KindEnroll
+// token) to the owning user.
+func (s *FileStore) UserByID(userID [16]byte) (User, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, u := range s.reg.Users {
+		if id, err := ParseDeviceID(u.ID); err == nil && id == userID {
+			return u, true
+		}
+	}
+	return User{}, false
+}
+
 // DeviceCount returns how many devices a user owns.
 func (s *FileStore) DeviceCount(handle string) int {
 	s.mu.RLock()

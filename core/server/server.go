@@ -1,10 +1,20 @@
+// Package server assembles the gvpn server pipeline: it accepts connections,
+// authenticates them in-tunnel, and runs ONE multiplexed WireGuard engine over
+// all of them (one device, one TUN, many peers). A connection is either an
+// existing device (auth -> session bind -> data path) or a new device enrolling
+// in-band (auth -> enroll exchange -> data path). The server is the single
+// runtime writer of the registry. Transport-agnostic: production supplies a
+// GOST-TLS listener and a real TUN; tests use plain TCP and netstack. Pure Go.
 package server
 
 import (
 	"net"
+	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/g00dvin/gvpn/core/authgate"
+	"github.com/g00dvin/gvpn/core/enroll"
 	"github.com/g00dvin/gvpn/core/provision"
 	"github.com/g00dvin/gvpn/core/session"
 	"github.com/g00dvin/gvpn/core/transport"
@@ -12,58 +22,89 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-// TunFactory creates a fresh TUN device for one client (a real kernel TUN in
-// production; tun/netstack in tests).
-type TunFactory func() (tun.Device, error)
+// defaultSubnet is the tunnel subnet used for enrollment IP allocation when
+// Config.Subnet is empty.
+const defaultSubnet = "10.100.0.0/24"
 
-// Config holds the server's per-client WireGuard parameters.
-//
-// Per-client-device model (phase 1): one wireguard-go device per connected
-// client. This does NOT meet the 1000-client / 512MB budget; a single
-// multiplexed device is a later optimization.
+// sweepInterval is how often expired sessions are reaped.
+const sweepInterval = time.Minute
+
+// handshakeTimeout bounds each post-gate exchange (SESSION_BIND, or the enroll
+// request/response) so an authenticated client that stalls cannot park its
+// handler indefinitely — which would also block Close's handler wait, since a
+// pre-data-path handler is not yet tracked for force-close. It is a var so tests
+// can shorten it.
+var handshakeTimeout = 10 * time.Second
+
+// Config holds the multiplexed server's WireGuard parameters.
 type Config struct {
-	WGPrivateKey    wgengine.Key // server's WireGuard private key
-	ClientAllowedIP string       // allowed_ip for each client peer; default "0.0.0.0/0"
-	LogLevel        int          // wireguard-go log level (device.LogLevel*)
+	WGPrivateKey wgengine.Key // server's WireGuard private key
+	Subnet       string       // tunnel subnet for enrollment IP allocation; default 10.100.0.0/24
+	LogLevel     int          // wireguard-go log level (device.LogLevel*)
 }
 
-// Server accepts authenticated client connections and runs a per-client
-// WireGuard engine over each. Serve is transport-agnostic: production passes a
-// GOST-TLS listener; tests pass a plain TCP listener.
+func (c Config) subnetOrDefault() string {
+	if c.Subnet == "" {
+		return defaultSubnet
+	}
+	return c.Subnet
+}
+
+// Server accepts authenticated client connections and multiplexes them onto one
+// WireGuard device. Serve is transport-agnostic; production passes a GOST-TLS
+// listener, tests pass plain TCP.
 type Server struct {
 	gate     *authgate.Gate
 	sessions *session.Manager
 	store    *provision.FileStore
 	cfg      Config
-	newTun   TunFactory
+	eng      *wgengine.MuxEngine
+	subnet   netip.Prefix
 
-	mu      sync.Mutex
-	clients map[*client]struct{}
-	closed  bool
+	mu        sync.Mutex
+	conns     map[uint64]net.Conn
+	nextID    uint64
+	closed    bool
+	sweepStop chan struct{}
+	wg        sync.WaitGroup
 }
 
-type client struct {
-	eng  *wgengine.Engine
-	once sync.Once
-}
-
-// close tears the client's engine down at most once (handle and Server.Close can
-// race). eng.Close also closes the framed transport and thus the connection.
-func (c *client) close() { c.once.Do(func() { c.eng.Close() }) }
-
-// New builds a Server. The gate must have been constructed with store as its
-// DeviceStore so auth and the WG-pubkey lookup agree on the device set.
-func New(gate *authgate.Gate, sessions *session.Manager, store *provision.FileStore, cfg Config, newTun TunFactory) *Server {
-	if cfg.ClientAllowedIP == "" {
-		cfg.ClientAllowedIP = "0.0.0.0/0"
+// New builds a Server on a single TUN device. The gate must have been
+// constructed with store as its DeviceStore so auth, enrollment, and the
+// WG-pubkey lookups agree on the registry. It starts the session-sweep ticker.
+func New(gate *authgate.Gate, sessions *session.Manager, store *provision.FileStore, cfg Config, tunDev tun.Device) (*Server, error) {
+	subnet, err := netip.ParsePrefix(cfg.subnetOrDefault())
+	if err != nil {
+		return nil, err
 	}
-	return &Server{
-		gate:     gate,
-		sessions: sessions,
-		store:    store,
-		cfg:      cfg,
-		newTun:   newTun,
-		clients:  make(map[*client]struct{}),
+	eng, err := wgengine.NewMuxEngine(tunDev, cfg.WGPrivateKey, cfg.LogLevel)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{
+		gate:      gate,
+		sessions:  sessions,
+		store:     store,
+		cfg:       cfg,
+		eng:       eng,
+		subnet:    subnet,
+		conns:     make(map[uint64]net.Conn),
+		sweepStop: make(chan struct{}),
+	}
+	go s.sweepLoop()
+	return s, nil
+}
+
+func (s *Server) sweepLoop() {
+	t := time.NewTicker(sweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			s.sessions.Sweep()
+		case <-s.sweepStop:
+			return
+		}
 	}
 }
 
@@ -74,86 +115,182 @@ func (s *Server) Serve(ln net.Listener) error {
 		if err != nil {
 			return err
 		}
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			conn.Close()
+			continue
+		}
+		s.wg.Add(1)
+		s.mu.Unlock()
 		go s.handle(conn)
 	}
 }
 
-// handle runs one connection through the full pipeline.
+// handle runs one connection through the gate and dispatches by token kind.
 func (s *Server) handle(conn net.Conn) {
-	// 1. In-tunnel auth. On failure the gate has already proxied to the decoy or
-	//    closed the connection.
+	defer s.wg.Done()
 	res, err := s.gate.Handle(conn)
 	if err != nil || !res.Authenticated {
-		return
+		return // the gate proxied to the decoy or closed the connection
 	}
-	// 2. Bind (new or resumed) session.
-	if _, err := s.sessions.Bind(res.DeviceID, res.Conn); err != nil {
-		res.Conn.Close()
-		return
+	switch res.Kind {
+	case authgate.KindEnroll:
+		s.handleEnroll(res.UserID, res.Conn)
+	default:
+		s.handleDevice(res.DeviceID, res.Conn)
 	}
-	// 3. Resolve the device's registered WireGuard public key.
-	peerPub, ok := s.store.WGPublicKey(res.DeviceID)
-	if !ok {
-		res.Conn.Close()
-		return
-	}
-	// 4. Per-client TUN + WireGuard engine over the framed transport.
-	tunDev, err := s.newTun()
-	if err != nil {
-		res.Conn.Close()
-		return
-	}
-	nt := newNotifyTransport(transport.NewStreamTransport(res.Conn))
-	eng, err := wgengine.New(tunDev, nt, wgengine.Config{
-		PrivateKey:    s.cfg.WGPrivateKey,
-		PeerPublicKey: peerPub,
-		AllowedIPs:    []string{s.cfg.ClientAllowedIP},
-	}, s.cfg.LogLevel)
-	if err != nil {
-		tunDev.Close()
-		res.Conn.Close()
-		return
-	}
-	// 5. Track for shutdown, then run until the connection dies.
-	c := &client{eng: eng}
-	if !s.track(c) {
-		c.close() // server already closing
-		return
-	}
-	<-nt.Done()
-	s.untrack(c)
-	c.close() // closes the device, bind reader, and the transport (=> the conn)
 }
 
-func (s *Server) track(c *client) bool {
+// handleDevice binds (or resumes) the session for an already-registered device,
+// ensures its WireGuard peer, and runs the data path.
+func (s *Server) handleDevice(deviceID [16]byte, conn net.Conn) {
+	conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	if _, err := s.sessions.Bind(deviceID, conn); err != nil {
+		conn.Close()
+		return
+	}
+	dev, ok := s.store.Device(deviceID)
+	if !ok {
+		conn.Close()
+		return
+	}
+	pub, ok := s.store.WGPublicKey(deviceID)
+	if !ok {
+		conn.Close()
+		return
+	}
+	if err := s.eng.AddPeer(pub, dev.TunnelIP+"/32"); err != nil {
+		conn.Close()
+		return
+	}
+	conn.SetDeadline(time.Time{}) // hand a deadline-free conn to the WG data path
+	s.runDataPath(conn)
+}
+
+// handleEnroll provisions a brand-new device in-band: it checks the user's
+// guardrails, reads the device's WG public key, allocates a tunnel IP + device
+// id, mints a per-device PSK, persists the device (encrypted) and adds the live
+// peer, replies with the credentials, then runs the data path. Any failure
+// closes the connection with no distinguishing response.
+func (s *Server) handleEnroll(userID [16]byte, conn net.Conn) {
+	u, ok := s.store.UserByID(userID)
+	if !ok || u.Disabled || !u.EnrollOpen {
+		conn.Close()
+		return
+	}
+	if u.DeviceCap > 0 && s.store.DeviceCount(u.Handle) >= u.DeviceCap {
+		conn.Close()
+		return
+	}
+	conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	req, err := enroll.ReadRequest(conn)
+	if err != nil {
+		conn.Close()
+		return
+	}
+	used := make([]netip.Addr, 0)
+	for _, ipStr := range s.store.UsedIPs() {
+		if a, err := netip.ParseAddr(ipStr); err == nil {
+			used = append(used, a)
+		}
+	}
+	ip, err := provision.AllocateIP(used, s.subnet)
+	if err != nil {
+		conn.Close()
+		return
+	}
+	id, err := provision.NewDeviceID()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	psk, err := provision.NewAuthPSK()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	pub := wgengine.Key(req.WGPublic)
+	dev := provision.Device{
+		DeviceID: id.String(), User: u.Handle, WGPublic: pub.Hex(),
+		TunnelIP: ip.String(), Source: "enroll",
+	}
+	if err := s.store.AddDevice(dev, psk); err != nil {
+		conn.Close()
+		return
+	}
+	if err := s.eng.AddPeer(pub, ip.String()+"/32"); err != nil {
+		conn.Close()
+		return
+	}
+	if err := enroll.WriteResponse(conn, enroll.Response{
+		DeviceID: [16]byte(id), TunnelIP: ip.String(), DevicePSK: psk,
+	}); err != nil {
+		conn.Close()
+		return
+	}
+	conn.SetDeadline(time.Time{}) // hand a deadline-free conn to the WG data path
+	s.runDataPath(conn)
+}
+
+// runDataPath registers conn into the mux engine and blocks until the connection
+// dies, then deregisters and closes it. notifyTransport signals death on the
+// first read/write error or Close.
+func (s *Server) runDataPath(conn net.Conn) {
+	nt := newNotifyTransport(transport.NewStreamTransport(conn))
+	id, ok := s.track(conn)
+	if !ok {
+		conn.Close() // server is shutting down
+		return
+	}
+	s.eng.Register(id, nt)
+	<-nt.Done()
+	s.eng.Deregister(id)
+	s.untrack(id)
+	conn.Close()
+}
+
+// track records conn under a fresh connection id (>= 1), or returns false if the
+// server is closing.
+func (s *Server) track(conn net.Conn) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return false
+		return 0, false
 	}
-	s.clients[c] = struct{}{}
-	return true
+	s.nextID++
+	id := s.nextID
+	s.conns[id] = conn
+	return id, true
 }
 
-func (s *Server) untrack(c *client) {
+func (s *Server) untrack(id uint64) {
 	s.mu.Lock()
-	delete(s.clients, c)
+	delete(s.conns, id)
 	s.mu.Unlock()
 }
 
-// Close tears down all active client engines. The caller closes the listener
-// (which stops Serve's accept loop).
+// Close stops accepting work, closes all live connections (unblocking their
+// handlers), waits for the handlers to finish, then shuts the engine and the
+// sweep ticker down. It is idempotent. The caller closes the listener.
 func (s *Server) Close() error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
 	s.closed = true
-	cs := make([]*client, 0, len(s.clients))
-	for c := range s.clients {
-		cs = append(cs, c)
+	conns := make([]net.Conn, 0, len(s.conns))
+	for _, c := range s.conns {
+		conns = append(conns, c)
 	}
-	s.clients = make(map[*client]struct{})
+	s.conns = make(map[uint64]net.Conn)
 	s.mu.Unlock()
-	for _, c := range cs {
-		c.close()
+
+	close(s.sweepStop)
+	for _, c := range conns {
+		c.Close()
 	}
-	return nil
+	s.wg.Wait()
+	return s.eng.Close()
 }

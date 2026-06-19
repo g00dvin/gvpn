@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/hex"
 	"io"
 	"net"
@@ -18,16 +17,17 @@ import (
 	"github.com/g00dvin/gvpn/core/transport"
 	"github.com/g00dvin/gvpn/core/wgengine"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
+// TestServerEndToEndTunnelHTTP provisions a device, then drives the full
+// multiplexed pipeline: dial -> auth -> session bind -> WireGuard over the mux ->
+// HTTP through the tunnel.
 func TestServerEndToEndTunnelHTTP(t *testing.T) {
 	serverWG, _ := wgengine.GeneratePrivateKey()
-	serverTunIP := netip.MustParseAddr("192.168.4.1")
-	clientTunIP := netip.MustParseAddr("192.168.4.2")
+	serverTunIP := netip.MustParseAddr("10.100.0.1")
+	clientTunIP := netip.MustParseAddr("10.100.0.2")
 
-	// Provision a device and register it where the server's store will load it.
 	reg := filepath.Join(t.TempDir(), "registry.json")
 	c, err := provision.NewCipherFromHex(strings.Repeat("ab", 32))
 	if err != nil {
@@ -55,24 +55,20 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 		t.Fatalf("AddDevice: %v", err)
 	}
 
-	// The server's per-client TUN factory creates a netstack device and hands the
-	// test its *netstack.Net so we can run a service on the server tunnel IP.
-	netCh := make(chan *netstack.Net, 1)
-	newTun := func() (tun.Device, error) {
-		dev, n, err := netstack.CreateNetTUN([]netip.Addr{serverTunIP}, nil, 1420)
-		if err == nil {
-			netCh <- n
-		}
-		return dev, err
+	serverTun, serverNet, err := netstack.CreateNetTUN([]netip.Addr{serverTunIP}, nil, 1420)
+	if err != nil {
+		t.Fatalf("server CreateNetTUN: %v", err)
 	}
-
-	srv := New(
+	srv, err := New(
 		authgate.NewGate(store, nil),
 		session.NewManager(time.Minute),
 		store,
 		Config{WGPrivateKey: serverWG, LogLevel: device.LogLevelSilent},
-		newTun,
+		serverTun,
 	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -81,7 +77,6 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 	go srv.Serve(ln)
 	defer srv.Close()
 
-	// --- Client side: dial, authenticate, bind a session, start WireGuard. ---
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -108,7 +103,7 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 		PrivateKey:    clientPriv,
 		PeerPublicKey: serverWG.PublicKey(),
 		AllowedIPs:    []string{"0.0.0.0/0"},
-		Endpoint:      "server:0", // placeholder; arms the client handshake
+		Endpoint:      "server:0",
 		Keepalive:     5,
 	}, device.LogLevelSilent)
 	if err != nil {
@@ -116,13 +111,6 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 	}
 	defer clientEng.Close()
 
-	// --- HTTP service on the server's tunnel IP (via the captured netstack). ---
-	var serverNet *netstack.Net
-	select {
-	case serverNet = <-netCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("server never created its per-client TUN (auth/bind failed?)")
-	}
 	httpLn, err := serverNet.ListenTCP(&net.TCPAddr{IP: serverTunIP.AsSlice(), Port: 80})
 	if err != nil {
 		t.Fatalf("netstack ListenTCP: %v", err)
@@ -133,7 +121,6 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 	go httpSrv.Serve(httpLn)
 	defer httpSrv.Close()
 
-	// --- Client GETs the service over the tunnel; retry while the handshake converges. ---
 	httpClient := &http.Client{
 		Transport: &http.Transport{DialContext: clientNet.DialContext},
 		Timeout:   2 * time.Second,
@@ -141,7 +128,7 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 	deadline := time.Now().Add(20 * time.Second)
 	var body []byte
 	for time.Now().Before(deadline) {
-		resp, err := httpClient.Get("http://192.168.4.1/")
+		resp, err := httpClient.Get("http://10.100.0.1/")
 		if err != nil {
 			time.Sleep(200 * time.Millisecond)
 			continue
@@ -153,6 +140,4 @@ func TestServerEndToEndTunnelHTTP(t *testing.T) {
 	if string(body) != "hello through the gvpn server" {
 		t.Fatalf("tunnel HTTP body = %q, want the greeting (pipeline/handshake failed)", body)
 	}
-
-	_ = context.Background
 }
