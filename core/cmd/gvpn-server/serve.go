@@ -60,7 +60,9 @@ func run(cfg Config, deps serveDeps) error {
 		LogLevel:     deps.LogLevel,
 	}, tunDev)
 	if err != nil {
-		tunDev.Close()
+		// server.New builds the WireGuard device on tunDev and closes it on
+		// construction failure, so we must NOT close it again here: a second
+		// Close panics the netstack TUN (the kernel TUN is idempotent).
 		return err
 	}
 

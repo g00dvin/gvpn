@@ -50,11 +50,10 @@ static int gvpn_gen_gost_selfsigned(const char *cn, const char *certPath,
 
     snprintf(san, sizeof(san), "DNS:%s", cn);
     ext = X509V3_EXT_conf_nid(NULL, NULL, NID_subject_alt_name, san);
-    if (ext) {
-        X509_add_ext(x, ext, -1);
-        X509_EXTENSION_free(ext);
-        ext = NULL;
-    }
+    if (!ext) goto done; // a cert without a SAN fails client hostname verification
+    if (X509_add_ext(x, ext, -1) != 1) goto done;
+    X509_EXTENSION_free(ext);
+    ext = NULL;
 
     {
         const EVP_MD *md = EVP_get_digestbyname("md_gost12_256");
