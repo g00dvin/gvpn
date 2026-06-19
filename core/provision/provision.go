@@ -102,6 +102,16 @@ func Generate(user, tunnelIP string, p GenerateParams) (Bundle, Material, error)
 	return bundle, mat, nil
 }
 
+// NewAuthPSK returns a fresh random per-device AUTH PSK. The server mints one for
+// each dynamically enrolled device (the CLI path uses Generate instead).
+func NewAuthPSK() ([]byte, error) {
+	psk := make([]byte, authPSKSize)
+	if _, err := io.ReadFull(rand.Reader, psk); err != nil {
+		return nil, err
+	}
+	return psk, nil
+}
+
 // Record turns Material into an encrypted registry Device. source is "admin" or
 // "enroll".
 func (m Material) Record(c *Cipher, source string) (Device, error) {

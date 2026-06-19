@@ -51,3 +51,17 @@ func TestMaterialRecordEncryptsPSK(t *testing.T) {
 		t.Fatalf("record fields: %+v", rec)
 	}
 }
+
+func TestNewAuthPSK(t *testing.T) {
+	a, err := NewAuthPSK()
+	if err != nil {
+		t.Fatalf("NewAuthPSK: %v", err)
+	}
+	if len(a) != authPSKSize {
+		t.Fatalf("psk len = %d, want %d", len(a), authPSKSize)
+	}
+	b, _ := NewAuthPSK()
+	if string(a) == string(b) {
+		t.Fatal("NewAuthPSK must return a fresh random key each call")
+	}
+}

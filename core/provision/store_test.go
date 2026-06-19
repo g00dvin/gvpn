@@ -156,3 +156,22 @@ func GeneratePrivateKeyHex(t *testing.T) (string, string) {
 	}
 	return k, k
 }
+
+func TestFileStoreUserByID(t *testing.T) {
+	fs, _ := newTestStore(t)
+	u, _, err := fs.AddUser("dora")
+	if err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+	id, err := ParseDeviceID(u.ID)
+	if err != nil {
+		t.Fatalf("ParseDeviceID: %v", err)
+	}
+	got, ok := fs.UserByID(id)
+	if !ok || got.Handle != "dora" {
+		t.Fatalf("UserByID = %+v,%v want dora", got, ok)
+	}
+	if _, ok := fs.UserByID([16]byte{0xFF}); ok {
+		t.Fatal("UserByID unknown id: ok = true")
+	}
+}
