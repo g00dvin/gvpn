@@ -29,6 +29,13 @@ const defaultSubnet = "10.100.0.0/24"
 // sweepInterval is how often expired sessions are reaped.
 const sweepInterval = time.Minute
 
+// handshakeTimeout bounds each post-gate exchange (SESSION_BIND, or the enroll
+// request/response) so an authenticated client that stalls cannot park its
+// handler indefinitely — which would also block Close's handler wait, since a
+// pre-data-path handler is not yet tracked for force-close. It is a var so tests
+// can shorten it.
+var handshakeTimeout = 10 * time.Second
+
 // Config holds the multiplexed server's WireGuard parameters.
 type Config struct {
 	WGPrivateKey wgengine.Key // server's WireGuard private key
@@ -138,6 +145,7 @@ func (s *Server) handle(conn net.Conn) {
 // handleDevice binds (or resumes) the session for an already-registered device,
 // ensures its WireGuard peer, and runs the data path.
 func (s *Server) handleDevice(deviceID [16]byte, conn net.Conn) {
+	conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	if _, err := s.sessions.Bind(deviceID, conn); err != nil {
 		conn.Close()
 		return
@@ -156,6 +164,7 @@ func (s *Server) handleDevice(deviceID [16]byte, conn net.Conn) {
 		conn.Close()
 		return
 	}
+	conn.SetDeadline(time.Time{}) // hand a deadline-free conn to the WG data path
 	s.runDataPath(conn)
 }
 
@@ -174,6 +183,7 @@ func (s *Server) handleEnroll(userID [16]byte, conn net.Conn) {
 		conn.Close()
 		return
 	}
+	conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	req, err := enroll.ReadRequest(conn)
 	if err != nil {
 		conn.Close()
@@ -219,6 +229,7 @@ func (s *Server) handleEnroll(userID [16]byte, conn net.Conn) {
 		conn.Close()
 		return
 	}
+	conn.SetDeadline(time.Time{}) // hand a deadline-free conn to the WG data path
 	s.runDataPath(conn)
 }
 
