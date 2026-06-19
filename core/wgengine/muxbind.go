@@ -111,11 +111,21 @@ func (b *MuxBind) Close() error {
 // Register adds connection id backed by pt and starts its reader goroutine. The
 // reader exits when pt errors (owner closed the conn), when Deregister(id) is
 // called, or when Shutdown closes the bind.
+//
+// Callers must use a unique id per live connection. Re-registering an id that is
+// still live supersedes the old connection: its reader is signalled to stop and
+// its now-orphaned transport is closed (which also unblocks a reader parked in
+// ReadPacket), so the old reader is never leaked.
 func (b *MuxBind) Register(id uint64, pt transport.PacketTransport) {
 	mc := &muxConn{pt: pt, stop: make(chan struct{})}
 	b.connsMu.Lock()
+	prev := b.conns[id]
 	b.conns[id] = mc
 	b.connsMu.Unlock()
+	if prev != nil {
+		prev.once.Do(func() { close(prev.stop) })
+		prev.pt.Close()
+	}
 
 	b.wg.Add(1)
 	go func() {

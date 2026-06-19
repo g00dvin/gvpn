@@ -71,9 +71,11 @@ func (e *MuxEngine) Deregister(id uint64) { e.bind.Deregister(id) }
 
 // Close shuts the device down and releases all reader goroutines. It does not
 // own the registered connections, but Shutdown closes them to unblock readers
-// during teardown.
+// during teardown. The order matters: dev.Close stops the receive func draining
+// the bind's recv channel first, so Shutdown's dead signal then releases any
+// reader parked on a full recv send without a deadlock.
 func (e *MuxEngine) Close() error {
-	e.dev.Close()     // ends the bind's receive funcs
+	e.dev.Close()     // ends the bind's receive funcs (stops draining recv)
 	e.bind.Shutdown() // releases readers, closes registered transports
 	return nil
 }

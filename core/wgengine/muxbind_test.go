@@ -177,6 +177,40 @@ func TestMuxBindShutdownReleasesReaders(t *testing.T) {
 	}
 }
 
+func TestMuxBindReRegisterSameIDStopsOldReaderAndRoutesToNew(t *testing.T) {
+	b := NewMuxBind()
+	if _, _, err := b.Open(0); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	old := newFakePT()
+	b.Register(1, old) // reader parks in ReadPacket (no input)
+	newPT := newFakePT()
+	b.Register(1, newPT) // re-register the same live id
+
+	// Send for id 1 must reach the NEW transport, not the old one.
+	if err := b.Send([][]byte{[]byte("to-new")}, muxEndpoint{id: 1}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case got := <-newPT.out:
+		if string(got) != "to-new" {
+			t.Fatalf("new conn got %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("nothing written to the re-registered conn")
+	}
+
+	// The old reader must not be orphaned: Shutdown (which closes old too) returns.
+	b.Close()
+	done := make(chan struct{})
+	go func() { b.Shutdown(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown did not return (old reader orphaned)")
+	}
+}
+
 func TestMuxBindStaticContract(t *testing.T) {
 	b := NewMuxBind()
 	if b.BatchSize() != 1 {
