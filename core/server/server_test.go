@@ -2,6 +2,7 @@ package server
 
 import (
 	"net"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,11 +11,11 @@ import (
 	"github.com/g00dvin/gvpn/core/authgate"
 	"github.com/g00dvin/gvpn/core/provision"
 	"github.com/g00dvin/gvpn/core/session"
-	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-// An unauthenticated connection must be closed by the gate and must never reach
-// the TUN factory / WireGuard setup; Server.Close must then return cleanly.
+// An unauthenticated connection must be closed by the gate and never reach the
+// WireGuard data path; Server.Close must then return cleanly.
 func TestServerClosesUnauthenticatedConn(t *testing.T) {
 	c, err := provision.NewCipherFromHex(strings.Repeat("ab", 32))
 	if err != nil {
@@ -26,10 +27,14 @@ func TestServerClosesUnauthenticatedConn(t *testing.T) {
 	}
 	gate := authgate.NewGate(store, nil) // nil decoy => unauthenticated conns are closed
 	sessions := session.NewManager(time.Minute)
-	srv := New(gate, sessions, store, Config{}, func() (tun.Device, error) {
-		t.Error("TunFactory must not be called for an unauthenticated connection")
-		return nil, nil
-	})
+	tunDev, _, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("10.100.0.1")}, nil, 1420)
+	if err != nil {
+		t.Fatalf("CreateNetTUN: %v", err)
+	}
+	srv, err := New(gate, sessions, store, Config{}, tunDev)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
