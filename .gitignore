@@ -5,9 +5,9 @@ bin/
 *.test
 *.out
 
-# Compiled command binaries (e.g. `go build ./cmd/gvpn-provision`)
-gvpn-provision
-gvpn-server
+# Compiled command binaries (e.g. `go build -o core/gvpn-server ./cmd/gvpn-server`)
+core/gvpn-provision
+core/gvpn-server
 
 # Go workspace lock (local-only)
 go.work.sum
