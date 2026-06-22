@@ -175,3 +175,46 @@ func TestFileStoreUserByID(t *testing.T) {
 		t.Fatal("UserByID unknown id: ok = true")
 	}
 }
+
+func TestFileStoreSetEnrollOpenAndCap(t *testing.T) {
+	fs, _ := newTestStore(t)
+	if _, _, err := fs.AddUser("ed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.SetEnrollOpen("ed", false); err != nil {
+		t.Fatalf("SetEnrollOpen: %v", err)
+	}
+	if err := fs.SetDeviceCap("ed", 9); err != nil {
+		t.Fatalf("SetDeviceCap: %v", err)
+	}
+	u, ok := fs.User("ed")
+	if !ok || u.EnrollOpen || u.DeviceCap != 9 {
+		t.Fatalf("user = %+v, want EnrollOpen=false cap=9", u)
+	}
+	if err := fs.SetEnrollOpen("ghost", true); err == nil {
+		t.Fatal("expected error for unknown user")
+	}
+}
+
+func TestFileStoreSnapshots(t *testing.T) {
+	fs, _ := newTestStore(t)
+	if _, _, err := fs.AddUser("u1"); err != nil {
+		t.Fatal(err)
+	}
+	wg, _ := GeneratePrivateKeyHex(t)
+	if err := fs.AddDevice(Device{DeviceID: "22222222-2222-4222-8222-222222222222",
+		User: "u1", WGPublic: wg, TunnelIP: "10.100.0.2", Source: "admin"}, []byte("p")); err != nil {
+		t.Fatal(err)
+	}
+	if us := fs.Users(); len(us) != 1 || us[0].Handle != "u1" {
+		t.Fatalf("Users() = %+v", us)
+	}
+	if ds := fs.Devices(); len(ds) != 1 || ds[0].TunnelIP != "10.100.0.2" {
+		t.Fatalf("Devices() = %+v", ds)
+	}
+	// Snapshots must be copies: mutating the returned slice must not affect the store.
+	fs.Users()[0].Handle = "mutated"
+	if u, _ := fs.User("u1"); u.Handle != "u1" {
+		t.Fatal("Users() snapshot is not a copy")
+	}
+}

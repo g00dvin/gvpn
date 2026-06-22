@@ -44,3 +44,13 @@ func TestWriteQRPNGIs0600(t *testing.T) {
 		t.Fatalf("QR PNG mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
+
+func TestQRPNGBytes(t *testing.T) {
+	png, err := QRPNG("gvpn://enroll?u=alice", 256)
+	if err != nil {
+		t.Fatalf("QRPNG: %v", err)
+	}
+	if len(png) < 8 || string(png[1:4]) != "PNG" {
+		t.Fatal("QRPNG did not return a PNG")
+	}
+}
