@@ -50,6 +50,13 @@ func (c Config) subnetOrDefault() string {
 	return c.Subnet
 }
 
+// trackedConn is an active connection plus the device it serves (for status and
+// revocation).
+type trackedConn struct {
+	conn     net.Conn
+	deviceID [16]byte
+}
+
 // Server accepts authenticated client connections and multiplexes them onto one
 // WireGuard device. Serve is transport-agnostic; production passes a GOST-TLS
 // listener, tests pass plain TCP.
@@ -62,7 +69,7 @@ type Server struct {
 	subnet   netip.Prefix
 
 	mu        sync.Mutex
-	conns     map[uint64]net.Conn
+	conns     map[uint64]trackedConn
 	nextID    uint64
 	closed    bool
 	sweepStop chan struct{}
@@ -88,7 +95,7 @@ func New(gate *authgate.Gate, sessions *session.Manager, store *provision.FileSt
 		cfg:       cfg,
 		eng:       eng,
 		subnet:    subnet,
-		conns:     make(map[uint64]net.Conn),
+		conns:     make(map[uint64]trackedConn),
 		sweepStop: make(chan struct{}),
 	}
 	go s.sweepLoop()
@@ -165,7 +172,7 @@ func (s *Server) handleDevice(deviceID [16]byte, conn net.Conn) {
 		return
 	}
 	conn.SetDeadline(time.Time{}) // hand a deadline-free conn to the WG data path
-	s.runDataPath(conn)
+	s.runDataPath(conn, deviceID)
 }
 
 // handleEnroll provisions a brand-new device in-band: it checks the user's
@@ -230,15 +237,14 @@ func (s *Server) handleEnroll(userID [16]byte, conn net.Conn) {
 		return
 	}
 	conn.SetDeadline(time.Time{}) // hand a deadline-free conn to the WG data path
-	s.runDataPath(conn)
+	s.runDataPath(conn, [16]byte(id))
 }
 
-// runDataPath registers conn into the mux engine and blocks until the connection
-// dies, then deregisters and closes it. notifyTransport signals death on the
-// first read/write error or Close.
-func (s *Server) runDataPath(conn net.Conn) {
+// runDataPath registers conn (serving deviceID) into the mux engine and blocks
+// until the connection dies, then deregisters and closes it.
+func (s *Server) runDataPath(conn net.Conn, deviceID [16]byte) {
 	nt := newNotifyTransport(transport.NewStreamTransport(conn))
-	id, ok := s.track(conn)
+	id, ok := s.track(conn, deviceID)
 	if !ok {
 		conn.Close() // server is shutting down
 		return
@@ -250,9 +256,9 @@ func (s *Server) runDataPath(conn net.Conn) {
 	conn.Close()
 }
 
-// track records conn under a fresh connection id (>= 1), or returns false if the
-// server is closing.
-func (s *Server) track(conn net.Conn) (uint64, bool) {
+// track records conn (serving deviceID) under a fresh connection id (>= 1), or
+// returns false if the server is closing.
+func (s *Server) track(conn net.Conn, deviceID [16]byte) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -260,7 +266,7 @@ func (s *Server) track(conn net.Conn) (uint64, bool) {
 	}
 	s.nextID++
 	id := s.nextID
-	s.conns[id] = conn
+	s.conns[id] = trackedConn{conn: conn, deviceID: deviceID}
 	return id, true
 }
 
@@ -281,10 +287,10 @@ func (s *Server) Close() error {
 	}
 	s.closed = true
 	conns := make([]net.Conn, 0, len(s.conns))
-	for _, c := range s.conns {
-		conns = append(conns, c)
+	for _, tc := range s.conns {
+		conns = append(conns, tc.conn)
 	}
-	s.conns = make(map[uint64]net.Conn)
+	s.conns = make(map[uint64]trackedConn)
 	s.mu.Unlock()
 
 	close(s.sweepStop)
@@ -293,4 +299,46 @@ func (s *Server) Close() error {
 	}
 	s.wg.Wait()
 	return s.eng.Close()
+}
+
+// ActiveDevices returns the deduplicated 16-byte ids of the devices that
+// currently have a live connection.
+func (s *Server) ActiveDevices() [][16]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[[16]byte]bool, len(s.conns))
+	out := make([][16]byte, 0, len(s.conns))
+	for _, tc := range s.conns {
+		if tc.deviceID == ([16]byte{}) || seen[tc.deviceID] {
+			continue
+		}
+		seen[tc.deviceID] = true
+		out = append(out, tc.deviceID)
+	}
+	return out
+}
+
+// RevokeDevice removes a device's registry record, drops its live WireGuard
+// peer, and closes any active connection it holds. It is idempotent: revoking an
+// unknown device returns nil.
+func (s *Server) RevokeDevice(deviceID [16]byte) error {
+	pub, hadPeer := s.store.WGPublicKey(deviceID)
+	_ = s.store.RemoveDevice(provision.DeviceID(deviceID).String())
+	if hadPeer {
+		if err := s.eng.RemovePeer(pub); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	var toClose []net.Conn
+	for _, tc := range s.conns {
+		if tc.deviceID == deviceID {
+			toClose = append(toClose, tc.conn)
+		}
+	}
+	s.mu.Unlock()
+	for _, c := range toClose {
+		c.Close() // handler unblocks, deregisters, untracks
+	}
+	return nil
 }

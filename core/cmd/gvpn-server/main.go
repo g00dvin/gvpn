@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/g00dvin/gvpn/core/gosttls"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func main() {
@@ -18,15 +19,17 @@ func main() {
 // dispatch routes the subcommand.
 func dispatch(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: gvpn-server <serve|gencert> [flags]")
+		return fmt.Errorf("usage: gvpn-server <serve|gencert|admin-passwd> [flags]")
 	}
 	switch args[0] {
 	case "serve":
 		return cmdServe(args[1:])
 	case "gencert":
 		return cmdGencert(args[1:])
+	case "admin-passwd":
+		return cmdAdminPasswd(args[1:])
 	default:
-		return fmt.Errorf("unknown command %q (want serve|gencert)", args[0])
+		return fmt.Errorf("unknown command %q (want serve|gencert|admin-passwd)", args[0])
 	}
 }
 
@@ -82,4 +85,31 @@ func cmdGencert(args []string) error {
 	}
 	fmt.Printf("wrote GOST cert %s / key %s\n", *certPath, *keyPath)
 	return nil
+}
+
+// cmdAdminPasswd prints a bcrypt hash for the given --password, for pasting into
+// server.yaml admin.password_hash.
+func cmdAdminPasswd(args []string) error {
+	fs := flag.NewFlagSet("admin-passwd", flag.ContinueOnError)
+	password := fs.String("password", "", "admin password to hash (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *password == "" {
+		return fmt.Errorf("admin-passwd: --password is required")
+	}
+	hash, err := bcryptHash(*password)
+	if err != nil {
+		return err
+	}
+	fmt.Println(hash)
+	return nil
+}
+
+func bcryptHash(password string) (string, error) {
+	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(h), nil
 }

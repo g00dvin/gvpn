@@ -131,6 +131,50 @@ func (s *FileStore) UserByID(userID [16]byte) (User, bool) {
 	return User{}, false
 }
 
+// SetEnrollOpen toggles whether the user may enroll new devices, and persists.
+func (s *FileStore) SetEnrollOpen(handle string, open bool) error {
+	return s.updateUser(handle, func(u *User) { u.EnrollOpen = open })
+}
+
+// SetDeviceCap sets the user's device cap (0 = unlimited), and persists.
+func (s *FileStore) SetDeviceCap(handle string, cap int) error {
+	return s.updateUser(handle, func(u *User) { u.DeviceCap = cap })
+}
+
+// updateUser applies mutate to the named user under the write lock and persists,
+// rolling back the in-memory change if the save fails.
+func (s *FileStore) updateUser(handle string, mutate func(*User)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.reg.Users {
+		if s.reg.Users[i].Handle == handle {
+			prev := s.reg.Users[i]
+			mutate(&s.reg.Users[i])
+			if err := SaveRegistry(s.path, s.reg); err != nil {
+				s.reg.Users[i] = prev
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("provision: user %q not found", handle)
+}
+
+// Users returns a copy of the user records (public fields only are meaningful;
+// EnrollPSKEnc remains encrypted). Safe to mutate by the caller.
+func (s *FileStore) Users() []User {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]User(nil), s.reg.Users...)
+}
+
+// Devices returns a copy of the device records. Safe to mutate by the caller.
+func (s *FileStore) Devices() []Device {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]Device(nil), s.reg.Devices...)
+}
+
 // DeviceCount returns how many devices a user owns.
 func (s *FileStore) DeviceCount(handle string) int {
 	s.mu.RLock()
