@@ -68,3 +68,62 @@ func TestLoadConfigRejectsBadAddress(t *testing.T) {
 		t.Fatal("expected error for malformed wireguard.address")
 	}
 }
+
+func TestLoadConfigOptionalAdminShareEnroll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	yaml := `
+server:
+  listen: ":443"
+tls:
+  cert: c
+  key: k
+wireguard:
+  private_key: aa
+  address: 10.100.0.1/24
+registry: r.json
+admin:
+  listen: 127.0.0.1:8080
+  password_hash: "$2a$10$abcdefghijklmnopqrstuv"
+share:
+  listen: 0.0.0.0:8443
+  cert: share.crt
+  key: share.key
+enroll:
+  host: vpn.example.com:443
+  sni: vpn.example.com
+  ca_fp: deadbeef
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Admin.Listen != "127.0.0.1:8080" || cfg.Admin.PasswordHash == "" {
+		t.Fatalf("admin = %+v", cfg.Admin)
+	}
+	if cfg.Share.Listen != "0.0.0.0:8443" || cfg.Share.Cert != "share.crt" {
+		t.Fatalf("share = %+v", cfg.Share)
+	}
+	if cfg.Enroll.Host != "vpn.example.com:443" || cfg.Enroll.SNI != "vpn.example.com" || cfg.Enroll.CAFp != "deadbeef" {
+		t.Fatalf("enroll = %+v", cfg.Enroll)
+	}
+}
+
+func TestLoadConfigWithoutOptionalSections(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yaml")
+	yaml := "server:\n  listen: \":443\"\ntls:\n  cert: c\n  key: k\nwireguard:\n  private_key: aa\n  address: 10.100.0.1/24\nregistry: r.json\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Admin.Listen != "" || cfg.Share.Listen != "" {
+		t.Fatal("optional sections should be empty when omitted")
+	}
+}

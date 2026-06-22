@@ -27,6 +27,20 @@ type Config struct {
 	} `yaml:"wireguard"`
 	Registry      string `yaml:"registry"`
 	MasterKeyFile string `yaml:"master_key_file"`
+	Admin         struct {
+		Listen       string `yaml:"listen"`        // 127.0.0.1:port; empty disables the admin UI
+		PasswordHash string `yaml:"password_hash"` // bcrypt hash for HTTP Basic Auth
+	} `yaml:"admin"`
+	Share struct {
+		Listen string `yaml:"listen"` // standard-TLS listener; empty disables the share page
+		Cert   string `yaml:"cert"`
+		Key    string `yaml:"key"`
+	} `yaml:"share"`
+	Enroll struct {
+		Host string `yaml:"host"` // host:port baked into enroll links/bundles
+		SNI  string `yaml:"sni"`
+		CAFp string `yaml:"ca_fp"`
+	} `yaml:"enroll"`
 }
 
 // LoadConfig reads and validates server.yaml.
