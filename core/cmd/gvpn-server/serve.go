@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"os/exec"
 	"time"
@@ -16,6 +17,9 @@ import (
 
 // sessionTTL is how long a disconnected session may be resumed.
 const sessionTTL = 5 * time.Minute
+
+// shareTokenTTL is how long a minted enrollment share link stays valid.
+const shareTokenTTL = time.Hour
 
 // serveDeps are the injectable host seams: a listener (GOST TLS in prod, plain
 // TCP in tests), a TUN factory (real kernel TUN in prod, netstack in tests), and
@@ -72,6 +76,34 @@ func run(cfg Config, deps serveDeps) error {
 	}
 	defer deps.NAT.Disable(cfg.Subnet())
 	defer srv.Close()
+
+	coords := enrollCoords{Host: cfg.Enroll.Host, SNI: cfg.Enroll.SNI, CAFp: cfg.Enroll.CAFp}
+	tokens := newShareTokenStore(shareTokenTTL)
+
+	// Optional admin console (127.0.0.1) behind bcrypt basic auth.
+	var httpServers []*http.Server
+	if cfg.Admin.Listen != "" {
+		admin := &http.Server{
+			Addr:    cfg.Admin.Listen,
+			Handler: basicAuth(cfg.Admin.PasswordHash, newAdminServer(srv, store, tokens, coords)),
+		}
+		httpServers = append(httpServers, admin)
+		go func() { _ = admin.ListenAndServe() }()
+	}
+	// Optional public share page over standard TLS.
+	if cfg.Share.Listen != "" {
+		share := &http.Server{
+			Addr:    cfg.Share.Listen,
+			Handler: newShareServer(store, tokens, coords),
+		}
+		httpServers = append(httpServers, share)
+		go func() { _ = share.ListenAndServeTLS(cfg.Share.Cert, cfg.Share.Key) }()
+	}
+	defer func() {
+		for _, hs := range httpServers {
+			_ = hs.Close()
+		}
+	}()
 
 	// Serve blocks until the listener is closed; it returns that error.
 	return srv.Serve(deps.Listener)

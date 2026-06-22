@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,5 +26,18 @@ func TestGencertStandardViaDispatch(t *testing.T) {
 func TestDispatchUnknownCommand(t *testing.T) {
 	if err := dispatch([]string{"frobnicate"}); err == nil {
 		t.Fatal("expected error for unknown subcommand")
+	}
+}
+
+func TestAdminPasswdSubcommand(t *testing.T) {
+	hash, err := bcryptHash("hunter2")
+	if err != nil {
+		t.Fatalf("bcryptHash: %v", err)
+	}
+	if !strings.HasPrefix(hash, "$2") {
+		t.Fatalf("not a bcrypt hash: %q", hash)
+	}
+	if err := dispatch([]string{"admin-passwd", "--password", "hunter2"}); err != nil {
+		t.Fatalf("dispatch admin-passwd: %v", err)
 	}
 }
