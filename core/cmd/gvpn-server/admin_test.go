@@ -112,3 +112,15 @@ func TestAdminMintShareLink(t *testing.T) {
 		t.Fatalf("mint share code=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestAdminMutatingHandlersRejectGet(t *testing.T) {
+	as, _ := newAdminFixture(t)
+	for _, path := range []string{"/users/add", "/users/remove", "/users/enroll", "/users/cap", "/devices/revoke", "/share/mint"} {
+		r := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		as.ServeHTTP(w, r)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET %s = %d, want 405", path, w.Code)
+		}
+	}
+}

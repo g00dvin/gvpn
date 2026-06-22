@@ -57,6 +57,9 @@ func (s *shareServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// The page body embeds the live enrollment PSK (inside the gvpn:// URI), so
+	// keep it out of browser/intermediary caches.
+	w.Header().Set("Cache-Control", "no-store, private")
 	// HREF is template.URL because html/template's href sanitizer otherwise
 	// rewrites the non-allowlisted gvpn:// scheme to "#ZgotmplZ". This is safe:
 	// EnrollLink.URI() builds the URL with url.Values.Encode, so every component

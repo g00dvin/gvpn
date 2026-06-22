@@ -127,3 +127,20 @@ func TestLoadConfigWithoutOptionalSections(t *testing.T) {
 		t.Fatal("optional sections should be empty when omitted")
 	}
 }
+
+func TestLoadConfigRejectsEnabledSectionMissingSubfields(t *testing.T) {
+	base := "server:\n  listen: \":443\"\ntls:\n  cert: c\n  key: k\nwireguard:\n  private_key: aa\n  address: 10.100.0.1/24\nregistry: r.json\n"
+	for name, extra := range map[string]string{
+		"admin without password_hash": "admin:\n  listen: 127.0.0.1:8080\n",
+		"share without cert/key":      "share:\n  listen: 0.0.0.0:8443\n",
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "server.yaml")
+		if err := os.WriteFile(path, []byte(base+extra), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatalf("%s: expected validation error", name)
+		}
+	}
+}

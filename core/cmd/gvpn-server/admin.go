@@ -30,16 +30,28 @@ type adminServer struct {
 func newAdminServer(srv *server.Server, store *provision.FileStore, tokens *shareTokenStore, coords enrollCoords) *adminServer {
 	a := &adminServer{srv: srv, store: store, tokens: tokens, coords: coords, mux: http.NewServeMux()}
 	a.mux.HandleFunc("/", a.dashboard)
-	a.mux.HandleFunc("/users/add", a.addUser)
-	a.mux.HandleFunc("/users/remove", a.removeUser)
-	a.mux.HandleFunc("/users/enroll", a.setEnroll)
-	a.mux.HandleFunc("/users/cap", a.setCap)
-	a.mux.HandleFunc("/devices/revoke", a.revokeDevice)
-	a.mux.HandleFunc("/share/mint", a.mintShare)
+	a.mux.HandleFunc("/users/add", postOnly(a.addUser))
+	a.mux.HandleFunc("/users/remove", postOnly(a.removeUser))
+	a.mux.HandleFunc("/users/enroll", postOnly(a.setEnroll))
+	a.mux.HandleFunc("/users/cap", postOnly(a.setCap))
+	a.mux.HandleFunc("/devices/revoke", postOnly(a.revokeDevice))
+	a.mux.HandleFunc("/share/mint", postOnly(a.mintShare))
 	return a
 }
 
 func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTTP(w, r) }
+
+// postOnly rejects non-POST requests, so a state-changing action cannot be
+// triggered by a GET (e.g. a query-string link in the operator's browser).
+func postOnly(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h(w, r)
+	}
+}
 
 // enrollLinkFor builds the gvpn://enroll URI for a user from its enroll PSK.
 func (a *adminServer) enrollLinkFor(handle string) (string, error) {

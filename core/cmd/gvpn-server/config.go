@@ -78,6 +78,15 @@ func (c Config) validate() error {
 	if c.Registry == "" {
 		return fmt.Errorf("gvpn-server: registry is required")
 	}
+	// Optional sections, but if enabled their required sub-fields must be set so a
+	// listener can't come up half-configured (e.g. an admin port with no password
+	// hash 401s every request; a share port with no cert silently fails to serve).
+	if c.Admin.Listen != "" && c.Admin.PasswordHash == "" {
+		return fmt.Errorf("gvpn-server: admin.password_hash is required when admin.listen is set")
+	}
+	if c.Share.Listen != "" && (c.Share.Cert == "" || c.Share.Key == "") {
+		return fmt.Errorf("gvpn-server: share.cert and share.key are required when share.listen is set")
+	}
 	return nil
 }
 

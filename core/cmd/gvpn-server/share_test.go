@@ -38,6 +38,10 @@ func TestSharePageRendersForValidToken(t *testing.T) {
 	if !strings.Contains(body, "data:image/png;base64,") {
 		t.Fatalf("share page missing embedded QR: %s", body)
 	}
+	// The page carries the live PSK; it must not be cached.
+	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("share page Cache-Control = %q, want no-store", cc)
+	}
 }
 
 func TestSharePageRejectsUnknownToken(t *testing.T) {
