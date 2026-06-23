@@ -74,6 +74,22 @@ func TestParseBundleRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestParseBundleRequiresServerName(t *testing.T) {
+	srv, _ := wgengine.GeneratePrivateKey()
+	// Start from a valid bundle, then blank server_name -> must be rejected so the
+	// dial never skips hostname verification.
+	b, _, err := provision.Generate("u", "10.100.0.2", provision.GenerateParams{
+		ServerWGPublicKey: srv.PublicKey(), ServerEndpoint: "127.0.0.1:443", ServerName: "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := b.Marshal()
+	if _, err := parseBundle(string(data)); err == nil {
+		t.Fatal("parseBundle(empty server_name): want error")
+	}
+}
+
 func TestConnectReportsConnectingThenErrorsOnBadBundle(t *testing.T) {
 	rep := &recordingReporter{}
 	if _, err := Connect("not json", -1, rep); err == nil {

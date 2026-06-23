@@ -78,6 +78,11 @@ func parseBundle(bundleJSON string) (clientConfig, error) {
 	if b.ServerEndpoint == "" {
 		return clientConfig{}, fmt.Errorf("mobile: server_endpoint is empty")
 	}
+	if b.ServerName == "" {
+		// Required so the GOST TLS dial enforces hostname verification (SSL_set1_host),
+		// not just chain-to-CA. The bundle always carries it.
+		return clientConfig{}, fmt.Errorf("mobile: server_name is empty")
+	}
 	return clientConfig{
 		deviceID: id, authPSK: psk, wgPriv: priv, serverPub: pub,
 		endpoint: b.ServerEndpoint, serverName: b.ServerName, caPEM: b.ServerCAPEM,
@@ -159,6 +164,7 @@ func newTunnel(cc clientConfig, tunDev tun.Device, dial transport.Dialer, report
 		Keepalive:     25,
 	}, device.LogLevelSilent)
 	if err != nil {
+		rt.Close() // release the reconnecting transport's reader if the bind opened
 		return nil, err
 	}
 	reporter.OnState("connected")
