@@ -5,12 +5,29 @@ package gosttls
 #cgo CFLAGS: -Wno-deprecated-declarations
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+#include <openssl/bio.h>
 #include <stdlib.h>
 
 // SSL_CTX_set_min/max_proto_version are function-like macros (SSL_CTX_ctrl),
 // which cgo cannot call directly; wrap them as real functions.
 static int gvpn_set_min_proto(SSL_CTX *ctx, int v) { return SSL_CTX_set_min_proto_version(ctx, v); }
 static int gvpn_set_max_proto(SSL_CTX *ctx, int v) { return SSL_CTX_set_max_proto_version(ctx, v); }
+
+// gvpn_add_ca_pem loads a single PEM CA certificate from memory into ctx's
+// verify store. Returns 1 on success, 0 on failure.
+static int gvpn_add_ca_pem(SSL_CTX *ctx, const char *pem) {
+    BIO *bio = BIO_new_mem_buf(pem, -1);
+    if (bio == NULL) return 0;
+    X509 *cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+    if (cert == NULL) return 0;
+    X509_STORE *store = SSL_CTX_get_cert_store(ctx);
+    int ok = X509_STORE_add_cert(store, cert);
+    X509_free(cert);
+    return ok;
+}
 */
 import "C"
 
@@ -28,6 +45,7 @@ type Config struct {
 	CertFile   string
 	KeyFile    string
 	CAFile     string
+	CAPEM      string // in-memory CA PEM; an alternative to CAFile (used by mobile clients)
 	ServerName string
 }
 
@@ -95,11 +113,24 @@ func newClientCtx(cfg Config) (*C.SSL_CTX, error) {
 		return nil, err
 	}
 
-	cCA := C.CString(cfg.CAFile)
-	defer C.free(unsafe.Pointer(cCA))
-	if C.SSL_CTX_load_verify_locations(ctx, cCA, nil) != 1 {
+	switch {
+	case cfg.CAPEM != "":
+		cPEM := C.CString(cfg.CAPEM)
+		defer C.free(unsafe.Pointer(cPEM))
+		if C.gvpn_add_ca_pem(ctx, cPEM) != 1 {
+			C.SSL_CTX_free(ctx)
+			return nil, fmt.Errorf("gosttls: load in-memory CA: %s", lastError())
+		}
+	case cfg.CAFile != "":
+		cCA := C.CString(cfg.CAFile)
+		defer C.free(unsafe.Pointer(cCA))
+		if C.SSL_CTX_load_verify_locations(ctx, cCA, nil) != 1 {
+			C.SSL_CTX_free(ctx)
+			return nil, fmt.Errorf("gosttls: load CA %q: %s", cfg.CAFile, lastError())
+		}
+	default:
 		C.SSL_CTX_free(ctx)
-		return nil, fmt.Errorf("gosttls: load CA %q: %s", cfg.CAFile, lastError())
+		return nil, fmt.Errorf("gosttls: no CA configured (set Config.CAPEM or Config.CAFile)")
 	}
 	// Require the server to present a certificate that chains to the CA.
 	C.SSL_CTX_set_verify(ctx, C.SSL_VERIFY_PEER, nil)
