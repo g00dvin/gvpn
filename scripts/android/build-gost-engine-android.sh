@@ -54,12 +54,18 @@ git -C "$src" fetch --depth 1 origin "$GOST_ENGINE_VERSION" 2>/dev/null || true
 git -C "$src" checkout -q "$GOST_ENGINE_VERSION"
 cd "$src"
 
-# Compile the engine + crypto sources, excluding the standalone CLI tools
-# (their own main()), the OpenSSL-3 provider sources, and the test programs.
-# This is a superset of the engine + gost_core + gost_err source lists; archive
-# members that are never referenced are simply not linked into the final binary.
+# Compile the engine + crypto sources, excluding:
+#   - the standalone CLI tools (gostsum/gost12sum, their own main())
+#   - the OpenSSL-3 provider sources (gost_prov*), we build the engine
+#   - the test programs (test_*)
+#   - gost_cipher_ctx.c: the unittest-only variant of the cipher ctx accessors.
+#     The engine uses gost_cipher_ctx_evp.c; both define the same
+#     GOST_cipher_ctx_* symbols, so including both is a duplicate-symbol link
+#     error. Upstream keeps gost_cipher_ctx.c in a separate unittest library.
+# The result is a superset of the engine + gost_core + gost_err source lists;
+# archive members that are never referenced are simply not linked.
 mapfile -t srcs < <(ls *.c \
-  | grep -vE '^(gostsum|gost12sum)\.c$' \
+  | grep -vE '^(gostsum|gost12sum|gost_cipher_ctx)\.c$' \
   | grep -vE '^gost_prov' \
   | grep -vE '^test_')
 

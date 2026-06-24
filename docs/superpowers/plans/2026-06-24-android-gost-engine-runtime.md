@@ -106,11 +106,14 @@ fi
 cd "$src"
 
 # Engine + crypto sources, excluding the standalone CLI tools, the OpenSSL-3
-# provider sources, and the tests. Compiled with -DBUILDING_ENGINE_AS_LIBRARY so
-# gost_eng.c exposes the public ENGINE_load_gost() entry point (upstream's
-# "library form") instead of the dynamic-module bind/check functions.
+# provider sources, the tests, and gost_cipher_ctx.c (the unittest-only variant
+# of the cipher-ctx accessors; the engine uses gost_cipher_ctx_evp.c and both
+# define the same GOST_cipher_ctx_* symbols -> duplicate-symbol link error if
+# both are included). Compiled with -DBUILDING_ENGINE_AS_LIBRARY so gost_eng.c
+# exposes the public ENGINE_load_gost() entry point (upstream's "library form")
+# instead of the dynamic-module bind/check functions.
 mapfile -t srcs < <(ls *.c \
-  | grep -vE '^(gostsum|gost12sum)\.c$' \
+  | grep -vE '^(gostsum|gost12sum|gost_cipher_ctx)\.c$' \
   | grep -vE '^gost_prov' \
   | grep -vE '^test_')
 
