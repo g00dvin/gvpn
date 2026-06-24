@@ -47,10 +47,14 @@ Run:
 ```bash
 git clone --depth 1 https://github.com/gost-engine/engine /tmp/gost-engine-src
 ls /tmp/gost-engine-src/*.c
-grep -n "bind_gost" /tmp/gost-engine-src/gost_eng.c
-sed -n '/set(GOST_ENGINE_SOURCES/,/)/p' /tmp/gost-engine-src/CMakeLists.txt
+sed -n '523,547p' /tmp/gost-engine-src/gost_eng.c     # the library-mode entry point
+cat /tmp/gost-engine-src/cmake/engine.cmake           # GOST_ENGINE_SOURCE_FILES + lib_gost_engine
 ```
-Expected: `gost_eng.c` exists and contains `static int bind_gost(ENGINE *e, const char *id)`; `CMakeLists.txt` defines a `GOST_ENGINE_SOURCES` list. Note that list — the script compiles exactly those sources **minus `gost_eng.c`** (our shim supplies it) and minus any provider-only sources (`gost_prov*.c`) and standalone tools with their own `main()` (`gostsum.c`, `gost12sum.c`).
+**Key finding (confirmed at SHA `3dd0f0e4`):** gost-engine has a built-in **library mode**. When `gost_eng.c` is compiled with `-DBUILDING_ENGINE_AS_LIBRARY`, the dynamic `IMPLEMENT_DYNAMIC_BIND_FN`/`CHECK_FN` macros are replaced by a public:
+```c
+void ENGINE_load_gost(void);   // ENGINE_new + make_gost_engine + ENGINE_add
+```
+This is upstream's own static-embedding entry (`cmake/engine.cmake` builds a `lib_gost_engine` target with exactly `COMPILE_DEFINITIONS "BUILDING_ENGINE_AS_LIBRARY"`). **No bind shim is needed** — the script compiles the engine + core sources with that define and exposes `ENGINE_load_gost`. The script compiles all top-level `*.c` **except** tests (`test_*.c`), the standalone CLI tools (`gostsum.c`, `gost12sum.c`), and the OpenSSL-3 provider sources (`gost_prov*.c`) — a superset of the engine + `gost_core` + `gost_err` source lists; unreferenced archive members are simply not linked.
 
 - [ ] **Step 3: Write the script**
 
@@ -101,25 +105,19 @@ if [ ! -d "$src" ]; then
 fi
 cd "$src"
 
-# A small shim that pulls in gost_eng.c's (static) bind_gost and exposes a
-# non-static entry point our cgo can call. OPENSSL_NO_DYNAMIC_ENGINE suppresses
-# the dynamic IMPLEMENT_DYNAMIC_BIND_FN/CHECK_FN at the bottom of gost_eng.c.
-cat > gvpn_bind_shim.c <<'EOF'
-#define OPENSSL_NO_DYNAMIC_ENGINE 1
-#include "gost_eng.c"
-int gvpn_bind_gost(ENGINE *e, const char *id) { return bind_gost(e, id); }
-EOF
-
-# Engine + crypto sources, excluding gost_eng.c (the shim includes it), the
-# OpenSSL-3 provider sources, and the standalone CLI tools.
+# Engine + crypto sources, excluding the standalone CLI tools, the OpenSSL-3
+# provider sources, and the tests. Compiled with -DBUILDING_ENGINE_AS_LIBRARY so
+# gost_eng.c exposes the public ENGINE_load_gost() entry point (upstream's
+# "library form") instead of the dynamic-module bind/check functions.
 mapfile -t srcs < <(ls *.c \
-  | grep -vE '^(gost_eng|gostsum|gost12sum)\.c$' \
-  | grep -vE '^gost_prov')
+  | grep -vE '^(gostsum|gost12sum)\.c$' \
+  | grep -vE '^gost_prov' \
+  | grep -vE '^test_')
 
 set -x
-"$CC" -O2 -fPIC -DOPENSSL_NO_DYNAMIC_ENGINE \
+"$CC" -O2 -fPIC -DBUILDING_ENGINE_AS_LIBRARY \
   -I"$OPENSSL_PREFIX/include" -I. \
-  -c "${srcs[@]}" gvpn_bind_shim.c
+  -c "${srcs[@]}"
 "$AR" rcs libgost.a ./*.o
 set +x
 
@@ -206,26 +204,17 @@ package gosttls
 #cgo CFLAGS: -Wno-deprecated-declarations
 #include <openssl/engine.h>
 
-// gvpn_bind_gost is provided by the statically-linked gost engine
-// (libgost.a, built by scripts/android/build-gost-engine-android.sh).
-extern int gvpn_bind_gost(ENGINE *e, const char *id);
+// ENGINE_load_gost is the public "library form" entry point of the
+// statically-linked gost engine (libgost.a, built by
+// scripts/android/build-gost-engine-android.sh with -DBUILDING_ENGINE_AS_LIBRARY).
+// It does ENGINE_new + make_gost_engine + ENGINE_add internally.
+extern void ENGINE_load_gost(void);
 
-// gvpn_register_gost builds the gost engine in-process, registers it so
-// ENGINE_by_id("gost") can find it, and returns it (not yet initialized),
-// or NULL. There is no ENGINESDIR / gost.so on Android, so the engine must
-// be bound from the statically-linked sources.
+// gvpn_register_gost registers the statically-linked gost engine so that
+// ENGINE_by_id("gost") resolves it, then returns the engine (not yet
+// initialized) or NULL. There is no ENGINESDIR / gost.so on Android.
 static ENGINE *gvpn_register_gost(void) {
-    ENGINE *e = ENGINE_new();
-    if (e == NULL) return NULL;
-    if (!gvpn_bind_gost(e, "gost")) {
-        ENGINE_free(e);
-        return NULL;
-    }
-    if (!ENGINE_add(e)) {     // ENGINE_add takes its own reference
-        ENGINE_free(e);
-        return NULL;
-    }
-    ENGINE_free(e);
+    ENGINE_load_gost();
     return ENGINE_by_id("gost");
 }
 */
@@ -540,4 +529,4 @@ Confirm the README push keeps `android-aar` and `android-engine-smoke` green (th
 
 **Placeholder scan:** `PIN_THIS_SHA` is intentionally resolved by Task 1 Step 1 (a concrete `git ls-remote` command), not a leftover TODO. The "confirm `GOST_ENGINE_SOURCES`" inspection (Task 1 Step 2) is a concrete command-driven step, the responsible way to handle an upstream detail that cannot be verified without an NDK. No vague "add error handling"/"write tests" placeholders.
 
-**Type consistency:** `gvpn_register_gost(void) -> ENGINE*` is defined identically in `engine_other.go` and `engine_android.go` and prototyped in `gosttls.go`; `gostEngine` stays `*C.ENGINE`; `gvpn_bind_gost(ENGINE*, const char*)` is defined by the shim (Task 1) and declared `extern` in `engine_android.go` (Task 2); `GVPN_REQUIRE_GOST`, `GenerateSelfSignedGOSTCert`, and `PKG_CONFIG_PATH` engine dir names match across Tasks 1, 3, 4.
+**Type consistency:** `gvpn_register_gost(void) -> ENGINE*` is defined identically in `engine_other.go` and `engine_android.go` and prototyped in `gosttls.go`; `gostEngine` stays `*C.ENGINE`; `ENGINE_load_gost(void)` is provided by `libgost.a` (Task 1, compiled `-DBUILDING_ENGINE_AS_LIBRARY`) and declared `extern` in `engine_android.go` (Task 2); `GVPN_REQUIRE_GOST`, `GenerateSelfSignedGOSTCert`, and `PKG_CONFIG_PATH` engine dir names match across Tasks 1, 3, 4.
