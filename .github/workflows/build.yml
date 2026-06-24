@@ -221,12 +221,20 @@ jobs:
           ABI: arm64-v8a
           PREFIX: ${{ github.workspace }}/openssl-android/arm64-v8a
         run: bash scripts/android/build-openssl-android.sh
+      - name: Cross-build gost engine for Android
+        if: steps.detect.outputs.present == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          ABI: arm64-v8a
+          OPENSSL_PREFIX: ${{ github.workspace }}/openssl-android/arm64-v8a
+          PREFIX: ${{ github.workspace }}/gost-engine-android/arm64-v8a
+        run: bash scripts/android/build-gost-engine-android.sh
       - name: gomobile bind core/mobile -> .aar
         if: steps.detect.outputs.present == 'true'
         working-directory: core
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
-          PKG_CONFIG_PATH: ${{ github.workspace }}/openssl-android/arm64-v8a/lib/pkgconfig
+          PKG_CONFIG_PATH: ${{ github.workspace }}/openssl-android/arm64-v8a/lib/pkgconfig:${{ github.workspace }}/gost-engine-android/arm64-v8a/lib/pkgconfig
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
@@ -243,6 +251,87 @@ jobs:
         with:
           name: gvpn-core-aar
           path: gvpn-core.aar
+
+  android-engine-smoke:
+    name: Android GOST engine smoke (emulator)
+    runs-on: ubuntu-latest
+    env:
+      OPENSSL_VERSION: "3.3.2"
+      NDK_VERSION: "26.3.11579264"
+      ANDROID_API: "21"
+      EMU_API: "30"
+      EMU_ARCH: "x86_64"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect component
+        id: detect
+        run: |
+          if [ -f scripts/android/build-gost-engine-android.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::gost engine script not present — skipping"
+          fi
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - if: steps.detect.outputs.present == 'true'
+        uses: android-actions/setup-android@v3
+      - name: Install NDK
+        if: steps.detect.outputs.present == 'true'
+        run: sdkmanager --install "ndk;${NDK_VERSION}"
+      - name: Cross-build OpenSSL (x86_64)
+        if: steps.detect.outputs.present == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          ABI: x86_64
+          PREFIX: ${{ github.workspace }}/openssl-android/x86_64
+        run: bash scripts/android/build-openssl-android.sh
+      - name: Cross-build gost engine (x86_64)
+        if: steps.detect.outputs.present == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          ABI: x86_64
+          OPENSSL_PREFIX: ${{ github.workspace }}/openssl-android/x86_64
+          PREFIX: ${{ github.workspace }}/gost-engine-android/x86_64
+        run: bash scripts/android/build-gost-engine-android.sh
+      - name: Build self-test binary (android/amd64)
+        if: steps.detect.outputs.present == 'true'
+        working-directory: core
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          PKG_CONFIG_PATH: ${{ github.workspace }}/openssl-android/x86_64/lib/pkgconfig:${{ github.workspace }}/gost-engine-android/x86_64/lib/pkgconfig
+        run: |
+          CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android${ANDROID_API}-clang"
+          CGO_ENABLED=1 GOOS=android GOARCH=amd64 CC="$CC" \
+            go test -c -o "$GITHUB_WORKSPACE/gosttls.test" ./gosttls
+      - name: Enable KVM
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run self-test on emulator
+        if: steps.detect.outputs.present == 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ env.EMU_API }}
+          arch: ${{ env.EMU_ARCH }}
+          force-avd-creation: false
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim
+          disable-animations: true
+          script: |
+            adb push "$GITHUB_WORKSPACE/gosttls.test" /data/local/tmp/gosttls.test
+            adb shell chmod 755 /data/local/tmp/gosttls.test
+            adb shell "cd /data/local/tmp && TMPDIR=/data/local/tmp GVPN_REQUIRE_GOST=1 ./gosttls.test -test.run TestEngineSelfTest -test.v" | tee /tmp/out.txt
+            grep -q '^--- PASS: TestEngineSelfTest' /tmp/out.txt
 
   ios:
     name: iOS client (gomobile)
