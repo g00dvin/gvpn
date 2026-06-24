@@ -235,7 +235,8 @@ jobs:
           # dependency graph; add it as a tool dependency (ephemeral in CI).
           go get golang.org/x/mobile/bind
           gomobile init
-          gomobile bind -target=android/arm64 -o "$GITHUB_WORKSPACE/gvpn-core.aar" ./mobile
+          gomobile bind -target=android/arm64 -androidapi "${ANDROID_API}" \
+            -o "$GITHUB_WORKSPACE/gvpn-core.aar" ./mobile
       - name: Upload .aar
         if: steps.detect.outputs.present == 'true'
         uses: actions/upload-artifact@v4
