@@ -231,6 +231,9 @@ jobs:
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
           export PATH="$(go env GOPATH)/bin:$PATH"
+          # Recent gomobile requires golang.org/x/mobile in the bound module's
+          # dependency graph; add it as a tool dependency (ephemeral in CI).
+          go get golang.org/x/mobile/bind
           gomobile init
           gomobile bind -target=android/arm64 -o "$GITHUB_WORKSPACE/gvpn-core.aar" ./mobile
       - name: Upload .aar
