@@ -183,7 +183,12 @@ package gosttls
 // gvpn_register_gost makes ENGINE_by_id("gost") resolvable and returns the
 // engine (not yet initialized), or NULL. On non-Android platforms the gost
 // engine is a system shared object found via OpenSSL's ENGINESDIR.
-static ENGINE *gvpn_register_gost(void) {
+//
+// External linkage (NOT static): defined here but called from the cgo preamble
+// of gosttls.go, a separate translation unit. A static definition links fine on
+// its own but produces "undefined reference to gvpn_register_gost" from
+// gosttls.go's generated call.
+ENGINE *gvpn_register_gost(void) {
     return ENGINE_by_id("gost");
 }
 */
@@ -213,7 +218,10 @@ extern void ENGINE_load_gost(void);
 // gvpn_register_gost registers the statically-linked gost engine so that
 // ENGINE_by_id("gost") resolves it, then returns the engine (not yet
 // initialized) or NULL. There is no ENGINESDIR / gost.so on Android.
-static ENGINE *gvpn_register_gost(void) {
+//
+// External linkage (NOT static): same cross-translation-unit reason as the
+// non-android variant.
+ENGINE *gvpn_register_gost(void) {
     ENGINE_load_gost();
     return ENGINE_by_id("gost");
 }
