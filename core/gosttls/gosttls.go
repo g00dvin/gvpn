@@ -15,16 +15,10 @@ package gosttls
 #include <openssl/engine.h>
 #include <stdlib.h>
 
-static ENGINE *gvpn_load_gost_engine(void) {
-    ENGINE *e = ENGINE_by_id("gost");
-    if (e == NULL) return NULL;
-    if (ENGINE_init(e) == 0) {
-        ENGINE_free(e);
-        return NULL;
-    }
-    ENGINE_set_default(e, ENGINE_METHOD_ALL);
-    return e;
-}
+// Defined per-platform in engine_other.go / engine_android.go: makes
+// ENGINE_by_id("gost") resolvable and returns the (not-yet-initialized)
+// engine, or NULL.
+ENGINE *gvpn_register_gost(void);
 */
 import "C"
 import (
@@ -48,11 +42,17 @@ func Init() error {
 			initErr = fmt.Errorf("gosttls: OPENSSL_init_ssl failed: %s", lastError())
 			return
 		}
-		e := C.gvpn_load_gost_engine()
+		e := C.gvpn_register_gost()
 		if e == nil {
-			initErr = fmt.Errorf("gosttls: failed to load gost engine (install libengine-gost-openssl): %s", lastError())
+			initErr = fmt.Errorf("gosttls: failed to load gost engine (install libengine-gost-openssl on the server; on Android it is statically linked): %s", lastError())
 			return
 		}
+		if C.ENGINE_init(e) == 0 {
+			C.ENGINE_free(e)
+			initErr = fmt.Errorf("gosttls: ENGINE_init(gost) failed: %s", lastError())
+			return
+		}
+		C.ENGINE_set_default(e, C.ENGINE_METHOD_ALL)
 		gostEngine = e
 	})
 	return initErr

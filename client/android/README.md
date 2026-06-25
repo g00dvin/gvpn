@@ -1,20 +1,28 @@
 # gvpn Android client
 
-Status: **build-infrastructure only.** This directory documents how the shared Go
-core is cross-compiled and bound for Android. There is no app yet (a Kotlin
-`VpnService` UI binding the `.aar` is a later sub-project), and **GOST TLS does
-not yet work on a device**: the `.aar` *compiles* `core/gosttls` against a
-cross-built OpenSSL, but the gost engine/provider runtime on Android (and a real
-on-device GOST handshake) is a separate, later sub-project. The `.aar` builds
-without the engine because `ENGINE_by_id("gost")` is a runtime call.
+Status: **build infrastructure + GOST engine proven on-device.** This directory
+documents how the shared Go core is cross-compiled and bound for Android. There
+is no app yet (a Kotlin `VpnService` UI binding the `.aar` is a later
+sub-project), but the GOST engine now works on a real Android ABI: the `.aar`
+statically links the gost engine into `core/gosttls`, and CI proves on an x86_64
+emulator that the engine loads (`ENGINE_by_id("gost")` resolves) and performs
+GOST crypto (GOST-2012-256 keygen + self-sign + verify). A full server↔device
+GOST-TLS *handshake* e2e remains a later sub-project.
 
 ## What works today
 
-The CI job **`Android core .aar (gomobile)`** cross-builds static OpenSSL 3 for
-`android-arm64` and runs `gomobile bind` of `core/mobile`, producing and
-uploading `gvpn-core.aar`. That `.aar` exports the client tunnel API to Kotlin:
-`mobile.Connect(bundleJSON, tunFD, reporter) -> Tunnel`, `Tunnel.Disconnect()`,
-and the `StatusReporter` callback interface.
+Two CI jobs:
+
+- **`Android core .aar (gomobile)`** cross-builds static OpenSSL 3 for
+  `android-arm64`, cross-builds the **gost engine** to a static `libgost.a`, and
+  runs `gomobile bind` of `core/mobile` with the engine linked in — producing and
+  uploading `gvpn-core.aar`. That `.aar` exports the client tunnel API to Kotlin:
+  `mobile.Connect(bundleJSON, tunFD, reporter) -> Tunnel`, `Tunnel.Disconnect()`,
+  and the `StatusReporter` callback interface.
+- **`Android GOST engine smoke (emulator)`** cross-builds OpenSSL + the gost
+  engine for `x86_64`, compiles the `core/gosttls` self-test for `android/amd64`,
+  and runs it on an Android emulator — asserting the engine loads and does GOST
+  crypto on-device (`GVPN_REQUIRE_GOST=1` makes a missing engine a hard failure).
 
 ## Building `gvpn-core.aar` locally
 
@@ -28,24 +36,34 @@ ANDROID_NDK_HOME=/path/to/ndk \
   PREFIX="$PWD/openssl-android/arm64-v8a" ABI=arm64-v8a ANDROID_API=21 \
   bash scripts/android/build-openssl-android.sh
 
-# 2. Bind core/mobile against it.
+# 2. Cross-build the gost engine to a static libgost.a against that OpenSSL.
+ANDROID_NDK_HOME=/path/to/ndk \
+  OPENSSL_PREFIX="$PWD/openssl-android/arm64-v8a" \
+  PREFIX="$PWD/gost-engine-android/arm64-v8a" ABI=arm64-v8a ANDROID_API=21 \
+  bash scripts/android/build-gost-engine-android.sh
+
+# 3. Bind core/mobile against both (OpenSSL + gost engine).
 go install golang.org/x/mobile/cmd/gomobile@latest
 go install golang.org/x/mobile/cmd/gobind@latest
 export PATH="$(go env GOPATH)/bin:$PATH"
 cd core
 go get golang.org/x/mobile/bind            # gomobile needs x/mobile in the module graph
-PKG_CONFIG_PATH="$PWD/../openssl-android/arm64-v8a/lib/pkgconfig" \
+PKG_CONFIG_PATH="$PWD/../openssl-android/arm64-v8a/lib/pkgconfig:$PWD/../gost-engine-android/arm64-v8a/lib/pkgconfig" \
   ANDROID_NDK_HOME=/path/to/ndk \
   gomobile init && \
   gomobile bind -target=android/arm64 -androidapi 21 -o ../gvpn-core.aar ./mobile
 ```
 
-`PKG_CONFIG_PATH` points `gosttls`'s `#cgo pkg-config: libssl libcrypto` at the
-cross-built static OpenSSL; `-androidapi 21` is required because NDK 26 supports
+`PKG_CONFIG_PATH` points `gosttls`'s `#cgo pkg-config` directives at the
+cross-built static OpenSSL (`libssl`/`libcrypto`) and the static gost engine
+(`gostengine` → `libgost.a`); the Android build tag registers the engine via
+`ENGINE_load_gost()`. `-androidapi 21` is required because NDK 26 supports
 API 21–34 only.
 
 ## Other ABIs
 
-`scripts/android/build-openssl-android.sh` is ABI-parameterized (`ABI=x86_64`,
-`armeabi-v7a`, `x86`); add them to the CI matrix and the `gomobile bind -target`
-list when a full multi-ABI `.aar` is needed (e.g. for the x86_64 emulator).
+Both `scripts/android/build-openssl-android.sh` (`ABI=x86_64`, `armeabi-v7a`,
+`x86`) and `scripts/android/build-gost-engine-android.sh` (`ABI=x86_64`) are
+ABI-parameterized; add them to the CI matrix and the `gomobile bind -target`
+list when a full multi-ABI `.aar` is needed. The `x86_64` engine build is
+already exercised by the emulator smoke job.
