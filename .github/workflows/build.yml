@@ -253,7 +253,7 @@ jobs:
           path: gvpn-core.aar
 
   android-engine-smoke:
-    name: Android GOST engine smoke (emulator)
+    name: Android GOST on-device (engine + handshake)
     runs-on: ubuntu-latest
     env:
       OPENSSL_VERSION: "3.3.2"
@@ -311,6 +311,16 @@ jobs:
           CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android${ANDROID_API}-clang"
           CGO_ENABLED=1 GOOS=android GOARCH=amd64 CC="$CC" \
             go test -c -o "$GITHUB_WORKSPACE/gosttls.test" ./gosttls
+      - name: Build handshake e2e binary (android/amd64)
+        if: steps.detect.outputs.present == 'true'
+        working-directory: core
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          PKG_CONFIG_PATH: ${{ github.workspace }}/openssl-android/x86_64/lib/pkgconfig:${{ github.workspace }}/gost-engine-android/x86_64/lib/pkgconfig
+        run: |
+          CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android${ANDROID_API}-clang"
+          CGO_ENABLED=1 GOOS=android GOARCH=amd64 CC="$CC" \
+            go test -c -o "$GITHUB_WORKSPACE/goste2e.test" ./goste2e
       - name: Enable KVM
         if: steps.detect.outputs.present == 'true'
         run: |
@@ -332,6 +342,10 @@ jobs:
             adb shell chmod 755 /data/local/tmp/gosttls.test
             adb shell "cd /data/local/tmp && TMPDIR=/data/local/tmp GVPN_REQUIRE_GOST=1 ./gosttls.test -test.run TestEngineSelfTest -test.v" | tee /tmp/out.txt
             grep -q '^--- PASS: TestEngineSelfTest' /tmp/out.txt
+            adb push "$GITHUB_WORKSPACE/goste2e.test" /data/local/tmp/goste2e.test
+            adb shell chmod 755 /data/local/tmp/goste2e.test
+            adb shell "cd /data/local/tmp && TMPDIR=/data/local/tmp GVPN_REQUIRE_GOST=1 ./goste2e.test -test.run TestGOSTControlHandshake -test.v" | tee /tmp/e2e.txt
+            grep -q '^--- PASS: TestGOSTControlHandshake' /tmp/e2e.txt
 
   ios:
     name: iOS client (gomobile)

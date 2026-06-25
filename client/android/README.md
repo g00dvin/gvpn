@@ -19,10 +19,15 @@ Two CI jobs:
   uploading `gvpn-core.aar`. That `.aar` exports the client tunnel API to Kotlin:
   `mobile.Connect(bundleJSON, tunFD, reporter) -> Tunnel`, `Tunnel.Disconnect()`,
   and the `StatusReporter` callback interface.
-- **`Android GOST engine smoke (emulator)`** cross-builds OpenSSL + the gost
-  engine for `x86_64`, compiles the `core/gosttls` self-test for `android/amd64`,
-  and runs it on an Android emulator — asserting the engine loads and does GOST
-  crypto on-device (`GVPN_REQUIRE_GOST=1` makes a missing engine a hard failure).
+- **`Android GOST on-device (engine + handshake)`** cross-builds OpenSSL + the
+  gost engine for `x86_64` and runs two checks on an Android emulator
+  (`GVPN_REQUIRE_GOST=1` makes a missing engine a hard failure):
+  - the `core/gosttls` self-test — the engine loads and does GOST crypto
+    (keygen + self-sign + verify) on-device;
+  - the `core/goste2e` handshake e2e — a real GOST-TLS handshake plus the gvpn
+    AUTH gate + SESSION_BIND control protocol, proving the transport **and**
+    control plane work on the Android ABI. (Still short of a full WireGuard
+    tunnel over GOST and of device→host networking — both later sub-projects.)
 
 ## Building `gvpn-core.aar` locally
 
