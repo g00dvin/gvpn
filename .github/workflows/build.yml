@@ -134,18 +134,22 @@ jobs:
           path: client/windows/build/bin/
 
   android:
-    name: Android client (gomobile)
+    name: Android client (gomobile + gradle)
     runs-on: ubuntu-latest
+    env:
+      OPENSSL_VERSION: "3.3.2"
+      NDK_VERSION: "26.3.11579264"
+      ANDROID_API: "21"
     steps:
       - uses: actions/checkout@v4
       - name: Detect component
         id: detect
         run: |
-          if [ -f client/android/settings.gradle ] || [ -f client/android/settings.gradle.kts ]; then
+          if [ -f client/android/settings.gradle.kts ] || [ -f client/android/settings.gradle ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::client/android/ not implemented yet — skipping"
+            echo "::notice::client/android/ app not present — skipping"
           fi
       - if: steps.detect.outputs.present == 'true'
         uses: actions/setup-go@v5
@@ -158,22 +162,61 @@ jobs:
           java-version: "17"
       - if: steps.detect.outputs.present == 'true'
         uses: android-actions/setup-android@v3
-      - name: Build gomobile .aar
+      - name: Install NDK
         if: steps.detect.outputs.present == 'true'
+        run: sdkmanager --install "ndk;${NDK_VERSION}"
+      - name: Cache cross-built OpenSSL
+        if: steps.detect.outputs.present == 'true'
+        id: ossl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/openssl-android
+          key: openssl-${{ env.OPENSSL_VERSION }}-arm64-v8a-ndk${{ env.NDK_VERSION }}
+      - name: Cross-build OpenSSL for Android
+        if: steps.detect.outputs.present == 'true' && steps.ossl-cache.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          ABI: arm64-v8a
+          PREFIX: ${{ github.workspace }}/openssl-android/arm64-v8a
+        run: bash scripts/android/build-openssl-android.sh
+      - name: Cross-build gost engine for Android
+        if: steps.detect.outputs.present == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          ABI: arm64-v8a
+          OPENSSL_PREFIX: ${{ github.workspace }}/openssl-android/arm64-v8a
+          PREFIX: ${{ github.workspace }}/gost-engine-android/arm64-v8a
+        run: bash scripts/android/build-gost-engine-android.sh
+      - name: gomobile bind core/mobile -> app/libs/gvpn-core.aar
+        if: steps.detect.outputs.present == 'true'
+        working-directory: core
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          PKG_CONFIG_PATH: ${{ github.workspace }}/openssl-android/arm64-v8a/lib/pkgconfig:${{ github.workspace }}/gost-engine-android/arm64-v8a/lib/pkgconfig
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          go get golang.org/x/mobile/bind
           gomobile init
-          gomobile bind -target=android -o client/android/app/libs/core.aar ./core/...
-      - name: Gradle build
+          mkdir -p "$GITHUB_WORKSPACE/client/android/app/libs"
+          gomobile bind -target=android/arm64 -androidapi "${ANDROID_API}" \
+            -o "$GITHUB_WORKSPACE/client/android/app/libs/gvpn-core.aar" ./mobile
+      - name: Set up Gradle
+        if: steps.detect.outputs.present == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Assemble debug APK + unit tests
         if: steps.detect.outputs.present == 'true'
         working-directory: client/android
-        run: ./gradlew assembleRelease
-      - name: Upload artifact
+        run: gradle --no-daemon assembleDebug testDebugUnitTest
+      - name: Upload APK
         if: steps.detect.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: gvpn-android
-          path: client/android/app/build/outputs/apk/**/*.apk
+          name: gvpn-android-apk
+          path: client/android/app/build/outputs/apk/debug/*.apk
 
   android-aar:
     name: Android core .aar (gomobile)
