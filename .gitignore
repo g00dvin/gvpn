@@ -18,6 +18,9 @@ go.work.sum
 client/windows/build/bin/
 client/android/app/build/
 client/android/app/libs/
+client/android/build/
+client/android/.gradle/
+client/android/local.properties
 
 # Native libraries
 *.so
