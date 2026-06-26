@@ -15,6 +15,15 @@ package gosttls
 static int gvpn_set_min_proto(SSL_CTX *ctx, int v) { return SSL_CTX_set_min_proto_version(ctx, v); }
 static int gvpn_set_max_proto(SSL_CTX *ctx, int v) { return SSL_CTX_set_max_proto_version(ctx, v); }
 
+// gvpn_disable_renegotiation turns off TLS renegotiation (SSL_CTX_set_options is
+// a function-like macro). A gvpn connection is driven full-duplex by WireGuard
+// (one reader, one writer concurrently); disabling renegotiation guarantees a
+// read never has to drive the write side (or vice versa), so the separate
+// read/write locks in Conn are sufficient for safe concurrent use.
+static void gvpn_disable_renegotiation(SSL_CTX *ctx) {
+    SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION);
+}
+
 // gvpn_add_ca_pem loads a single PEM CA certificate from memory into ctx's
 // verify store. Returns 1 on success, 0 on failure.
 static int gvpn_add_ca_pem(SSL_CTX *ctx, const char *pem) {
@@ -151,6 +160,7 @@ func pinTLS12(ctx *C.SSL_CTX) error {
 	if C.gvpn_set_max_proto(ctx, C.TLS1_2_VERSION) != 1 {
 		return fmt.Errorf("gosttls: set max proto TLS 1.2: %s", lastError())
 	}
+	C.gvpn_disable_renegotiation(ctx)
 	return nil
 }
 

@@ -26,9 +26,24 @@
 
 **Files:**
 - Create: `core/goste2e/tunnel_test.go`
+- Modify: `core/gosttls/conn.go`, `core/gosttls/config.go` (concurrency fix — see note)
 - Reference (pattern to mirror, transport swapped to gosttls): `core/server/e2e_test.go`
 
 Verifiable locally on Linux with the apt gost engine.
+
+> **Scope addition discovered during execution.** The first run of this test
+> SIGSEGV'd in `SSL_read` during cgo: `gosttls.Conn.Read`/`.Write` had **no
+> locking**, so WireGuard's concurrent reader+writer raced `SSL_read`/`SSL_write`
+> on one SSL object. The plain-TCP server/mobile e2e tests never exercised this,
+> but it is a **real production bug** (the multiplexed server and the mobile
+> client both drive a `gosttls.Conn` with wgengine's concurrent R/W). Fix in
+> `gosttls`: separate `readMu`/`writeMu` on `Conn` (one concurrent reader + one
+> concurrent writer; extra readers/writers and `SSL_free` serialized); `Close`
+> shuts the socket down (`syscall.Shutdown`) to interrupt blocking I/O before
+> freeing the SSL under both locks; and `SSL_OP_NO_RENEGOTIATION` on both
+> contexts (`gvpn_disable_renegotiation` in `config.go`) so a read never has to
+> drive the write half. Verified: `gosttls`, `goste2e`, `server`, `mobile`,
+> `cmd/gvpn-server` all green under `-race`.
 
 - [ ] **Step 1: Write the test**
 
