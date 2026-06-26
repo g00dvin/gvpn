@@ -1,13 +1,27 @@
 # gvpn Android client
 
-Status: **build infrastructure + GOST engine proven on-device.** This directory
-documents how the shared Go core is cross-compiled and bound for Android. There
-is no app yet (a Kotlin `VpnService` UI binding the `.aar` is a later
-sub-project), but the GOST engine now works on a real Android ABI: the `.aar`
-statically links the gost engine into `core/gosttls`, and CI proves on an x86_64
-emulator that the engine loads (`ENGINE_by_id("gost")` resolves) and performs
-GOST crypto (GOST-2012-256 keygen + self-sign + verify). A full server↔device
-GOST-TLS *handshake* e2e remains a later sub-project.
+Status: **buildable app shell; GOST proven on-device through the full tunnel.**
+This directory now contains a minimal Kotlin + Jetpack Compose app (Gradle) that
+binds the engine-linked `gvpn-core.aar` and assembles to a debug APK in CI. It is
+a **shell**: it displays the bound `mobile.Version()` string and has **no
+`VpnService`, secure storage, bundle import, or connect/disconnect yet** (that is
+the next sub-project). The shared Go core underneath is proven end-to-end on the
+Android ABI — CI runs, on an x86_64 emulator, the engine load + GOST crypto, a
+real GOST-TLS handshake + AUTH/SESSION_BIND, and real IP traffic (HTTP) through
+the WireGuard tunnel over GOST.
+
+## The app (`client/android/`)
+
+A single-activity Compose app (`namespace`/`applicationId` `dev.gvpn`, `minSdk
+26`, Kotlin 1.9.24, Compose BOM 2024.06, AGP 8.5.2, Gradle 8.7) that depends on
+`app/libs/gvpn-core.aar` and shows `gvpn core: <mobile.Version()>` — proving the
+`.aar` binds into a Gradle build. The CI job **`Android client (gomobile +
+gradle)`** builds the engine-linked `.aar`, drops it in `app/libs/`, and runs
+`gradle assembleDebug testDebugUnitTest`.
+
+Local build: install Gradle 8.7, build the `.aar` into `client/android/app/libs/`
+(via the engine + `gomobile bind ./mobile` steps below), then
+`cd client/android && gradle assembleDebug`.
 
 ## What works today
 
