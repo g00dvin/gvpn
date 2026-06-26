@@ -346,6 +346,8 @@ jobs:
             adb shell chmod 755 /data/local/tmp/goste2e.test
             adb shell "cd /data/local/tmp && TMPDIR=/data/local/tmp GVPN_REQUIRE_GOST=1 ./goste2e.test -test.run TestGOSTControlHandshake -test.v" | tee /tmp/e2e.txt
             grep -q '^--- PASS: TestGOSTControlHandshake' /tmp/e2e.txt
+            adb shell "cd /data/local/tmp && TMPDIR=/data/local/tmp GVPN_REQUIRE_GOST=1 ./goste2e.test -test.run TestGOSTTunnelHTTP -test.v" | tee /tmp/tunnel.txt
+            grep -q '^--- PASS: TestGOSTTunnelHTTP' /tmp/tunnel.txt
 
   ios:
     name: iOS client (gomobile)

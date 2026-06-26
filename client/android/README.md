@@ -24,10 +24,13 @@ Two CI jobs:
   (`GVPN_REQUIRE_GOST=1` makes a missing engine a hard failure):
   - the `core/gosttls` self-test — the engine loads and does GOST crypto
     (keygen + self-sign + verify) on-device;
-  - the `core/goste2e` handshake e2e — a real GOST-TLS handshake plus the gvpn
-    AUTH gate + SESSION_BIND control protocol, proving the transport **and**
-    control plane work on the Android ABI. (Still short of a full WireGuard
-    tunnel over GOST and of device→host networking — both later sub-projects.)
+  - the `core/goste2e` handshake e2e (`TestGOSTControlHandshake`) — a real
+    GOST-TLS handshake plus the gvpn AUTH gate + SESSION_BIND control protocol;
+  - the `core/goste2e` tunnel e2e (`TestGOSTTunnelHTTP`) — the **full pipeline**
+    over a real GOST transport: an HTTP GET flows through the WireGuard tunnel
+    (`server.Server` + gosttls listener ⟵ `gosttls.Dial` client), proving real IP
+    traffic over GOST on the Android ABI. (Still short of reconnect/roaming over
+    GOST and of device→host networking — both later sub-projects.)
 
 ## Building `gvpn-core.aar` locally
 

@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 )
@@ -31,10 +32,20 @@ import (
 // cut; a memory-BIO/netpoller variant (with working deadlines) is a later perf
 // task. Deadlines delegate to the original socket and are therefore best-effort
 // against the dup'd fd that SSL drives.
+// The SSL object is not safe for unsynchronized concurrent use. WireGuard drives
+// the connection full-duplex (a reader goroutine and a writer goroutine at once),
+// so SSL_read and SSL_write are guarded by separate locks: this permits one
+// concurrent reader and one concurrent writer (the WireGuard pattern) while
+// serializing any extra readers/writers and the SSL_free in Close. Renegotiation
+// is disabled at the context level (see gvpn_disable_renegotiation) so a read
+// never needs to drive the write half.
 type Conn struct {
-	ssl       *C.SSL
-	file      *os.File // dup of raw's fd, in blocking mode; drives SSL I/O
-	raw       net.Conn // original connection, kept for addrs/lifetime
+	ssl     *C.SSL
+	file    *os.File // dup of raw's fd, in blocking mode; drives SSL I/O
+	raw     net.Conn // original connection, kept for addrs/lifetime
+	readMu  sync.Mutex
+	writeMu sync.Mutex
+
 	closeOnce sync.Once
 }
 
@@ -192,10 +203,16 @@ func setClientVerifyName(ssl *C.SSL, name string) error {
 	return nil
 }
 
-// Read reads decrypted application data.
+// Read reads decrypted application data. Safe to call concurrently with Write
+// (one reader, one writer); extra concurrent readers are serialized.
 func (c *Conn) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.ssl == nil {
+		return 0, io.EOF
 	}
 	n := C.SSL_read(c.ssl, unsafe.Pointer(&p[0]), C.int(len(p)))
 	if n > 0 {
@@ -204,8 +221,14 @@ func (c *Conn) Read(p []byte) (int, error) {
 	return 0, c.ioError("read", n)
 }
 
-// Write encrypts and sends all of p.
+// Write encrypts and sends all of p. Safe to call concurrently with Read (one
+// reader, one writer); extra concurrent writers are serialized.
 func (c *Conn) Write(p []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.ssl == nil {
+		return 0, io.ErrClosedPipe
+	}
 	total := 0
 	for total < len(p) {
 		n := C.SSL_write(c.ssl, unsafe.Pointer(&p[total]), C.int(len(p)-total))
@@ -234,15 +257,28 @@ func (c *Conn) ioError(op string, ret C.int) error {
 	}
 }
 
-// Close shuts down the TLS session and releases all resources exactly once.
+// Close shuts down the TLS session and releases all resources exactly once. It
+// is safe to call while another goroutine is blocked in Read or Write: the
+// socket is shut down first to interrupt the blocking SSL_read/SSL_write, then
+// the SSL object is freed under both I/O locks so SSL_free never races a live
+// SSL_* call.
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		// Interrupt any in-flight blocking SSL_read/SSL_write on the dup'd socket
+		// so the lock acquisitions below cannot block forever. Best-effort: a
+		// graceful close_notify is skipped in favor of concurrency safety.
+		if c.file != nil {
+			syscall.Shutdown(int(c.file.Fd()), syscall.SHUT_RDWR)
+		}
+		c.readMu.Lock()
+		c.writeMu.Lock()
 		if c.ssl != nil {
-			C.SSL_shutdown(c.ssl) // best-effort close_notify
 			C.SSL_free(c.ssl)
 			c.ssl = nil
 		}
+		c.writeMu.Unlock()
+		c.readMu.Unlock()
 		if c.file != nil {
 			c.file.Close()
 		}
@@ -256,6 +292,11 @@ func (c *Conn) Close() error {
 // CipherName returns the negotiated cipher suite name (e.g. for asserting a
 // GOST suite was selected), or "" if no cipher is active.
 func CipherName(c *Conn) string {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.ssl == nil {
+		return ""
+	}
 	cipher := C.SSL_get_current_cipher(c.ssl)
 	if cipher == nil {
 		return ""
